@@ -1,0 +1,19 @@
+{
+  "id": "meeting-v1",
+  "name": "会议讨论",
+  "version": "1.0.0",
+  "author": "syncthink-official",
+  "description": "结构化会议记录：议题 → 发言 → 决议 → 行动项",
+  "allowedCardTypes": [
+    { "type": "agenda", "displayName": "议题", "color": "#4F46E5", "fields": [{"name": "title", "required": true}, {"name": "duration", "required": false}] },
+    { "type": "comment", "displayName": "发言", "color": "#0EA5E9", "fields": [{"name": "content", "required": true}, {"name": "speaker", "required": false}] },
+    { "type": "decision", "displayName": "决议", "color": "#10B981", "fields": [{"name": "content", "required": true}] },
+    { "type": "action", "displayName": "行动项", "color": "#F59E0B", "fields": [{"name": "content", "required": true}, {"name": "owner", "required": true}, {"name": "deadline", "required": false}] }
+  ],
+  "allowedConnections": [
+    { "from": "comment", "to": "agenda" },
+    { "from": "decision", "to": "agenda" },
+    { "from": "action", "to": "decision" }
+  ],
+  "agentCapabilities": ["summarize", "extract_actions", "generate_minutes"]
+}

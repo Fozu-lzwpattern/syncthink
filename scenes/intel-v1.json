@@ -1,0 +1,18 @@
+{
+  "id": "intel-v1",
+  "name": "情报分析",
+  "version": "1.0.0",
+  "author": "syncthink-official",
+  "description": "实体关系分析：实体 → 关系 → 判断 → 证据",
+  "allowedCardTypes": [
+    { "type": "entity", "displayName": "实体", "color": "#7C3AED", "fields": [{"name": "name", "required": true}, {"name": "entityType", "required": false}] },
+    { "type": "evidence", "displayName": "证据", "color": "#2563EB", "fields": [{"name": "content", "required": true}, {"name": "source", "required": false}] },
+    { "type": "judgment", "displayName": "判断", "color": "#DC2626", "fields": [{"name": "content", "required": true}, {"name": "confidence", "required": false}] }
+  ],
+  "allowedConnections": [
+    { "from": "entity", "to": "entity", "label": "关系" },
+    { "from": "evidence", "to": "judgment", "label": "支撑" },
+    { "from": "judgment", "to": "entity", "label": "关于" }
+  ],
+  "agentCapabilities": ["extract_entities", "find_relations", "generate_report"]
+}

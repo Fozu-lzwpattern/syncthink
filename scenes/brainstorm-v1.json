@@ -1,0 +1,17 @@
+{
+  "id": "brainstorm-v1",
+  "name": "发散收敛",
+  "version": "1.0.0",
+  "author": "syncthink-official",
+  "description": "头脑风暴：自由发散 → 聚类 → 投票 → 选中",
+  "allowedCardTypes": [
+    { "type": "idea", "displayName": "想法", "color": "#8B5CF6", "fields": [{"name": "content", "required": true}] },
+    { "type": "theme", "displayName": "主题", "color": "#0EA5E9", "fields": [{"name": "title", "required": true}] },
+    { "type": "selected", "displayName": "入选", "color": "#10B981", "fields": [{"name": "content", "required": true}, {"name": "reason", "required": false}] }
+  ],
+  "allowedConnections": [
+    { "from": "idea", "to": "theme" },
+    { "from": "idea", "to": "selected" }
+  ],
+  "agentCapabilities": ["cluster_ideas", "rank_by_votes", "generate_evaluation_matrix"]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "okr-v1",
+  "name": "目标拆解",
+  "version": "1.0.0",
+  "author": "syncthink-official",
+  "description": "OKR 树形拆解：Objective → KR → Task",
+  "allowedCardTypes": [
+    { "type": "objective", "displayName": "目标 O", "color": "#DC2626", "fields": [{"name": "title", "required": true}, {"name": "period", "required": false}] },
+    { "type": "kr", "displayName": "关键结果 KR", "color": "#F59E0B", "fields": [{"name": "title", "required": true}, {"name": "target", "required": true}, {"name": "current", "required": false}] },
+    { "type": "task", "displayName": "任务", "color": "#10B981", "fields": [{"name": "title", "required": true}, {"name": "owner", "required": false}, {"name": "status", "required": false}] }
+  ],
+  "allowedConnections": [
+    { "from": "kr", "to": "objective" },
+    { "from": "task", "to": "kr" }
+  ],
+  "layoutHints": [{ "type": "tree", "direction": "vertical" }],
+  "agentCapabilities": ["suggest_krs", "track_progress", "flag_blockers"]
+}
