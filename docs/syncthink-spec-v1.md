@@ -1,4 +1,4 @@
-# SyncThink 产品与技术规格说明书 v1.2
+# SyncThink 产品与技术规格说明书 v1.3
 
 > **本地优先、P2P 分布式、多人实时协同的无限结构化画布系统**
 > 团队级分布式思考节点网络 → A2A 社交基础设施
@@ -185,11 +185,11 @@ interface SyncThinkCard extends TLBaseShape {
     sceneType: string                   // 所属场景模式 ID
     cardType: string                    // 卡片类型（由 Schema 约束）
     fields: Record<string, unknown>     // 字段值
-    authorId: string                    // 创建者 peerId（人或 Agent）
+    authorNodeId: string                // 创建者 NodeIdentity ID（人或 Agent，持久化，不随会话变）
     isAgentCreated: boolean             // 是否由 Agent 创建
-    agentId?: string                    // Agent 标识（如有）
+    agentNodeId?: string                // Agent 的 NodeIdentity ID（如有）
     status?: 'draft' | 'confirmed' | 'archived'
-    votes?: string[]                    // 投票（peerId 列表）
+    votes?: string[]                    // 投票（nodeId 列表，持久化身份）
     createdAt: number                   // 时间戳
     updatedAt: number
   }
@@ -346,8 +346,8 @@ agent:  根据 AgentCapabilities 精细控制
 Agent Skill 连接的是本地 ws://localhost:9527
   → 端口不向外网暴露
   → 拿到 Skill 代码 ≠ 能访问画布（本地服务不存在则无法连接）
-  → Agent 接入需要本地 token（随机生成，人类成员审批）
-  → Agent 的操作在画布上有独立标识（其他人实时可见）
+  → Agent 接入需要持有本节点私钥（Ed25519 签名验证，见 7.0）
+  → Agent 的操作在画布上有独立 NodeIdentity 标识（其他人实时可见）
   → 可配置"Agent 写入需人工确认"模式
 ```
 
@@ -357,8 +357,9 @@ Agent Skill 连接的是本地 ws://localhost:9527
 |------|------|
 | 长度 | 12位字母数字，约 3.2×10¹² 种可能，暴力穷举不现实 |
 | 有效期 | 可设置（一次性 / N分钟内 / 永久），默认一次性 |
-| 吊销 | 房主可随时使旧邀请码失效 |
+| 吊销 | Channel owner 可随时使旧邀请码失效 |
 | 传输 | 不经过信令服务器，由成员自行通过安全渠道传递 |
+| 绑定身份 | 邀请码验证时包含 requesterNodeId + 签名，防止邀请码转让 |
 
 ---
 
@@ -747,8 +748,6 @@ syncthink/
 
 ---
 
----
-
 ## 十二、未来演化：从协作画布到 A2A 社交基础设施
 
 > 这一章记录的是 2026-04-08 凌晨的一个闪念。  
@@ -806,17 +805,17 @@ SyncThink 模式：
 **核心机制**：每个 SyncThink 节点可以与其他节点建立**持久化 P2P 信道**（不是临时的画布房间，而是长期存在的双向通道）。
 
 ```typescript
-interface AgentChannel {
-  channelId: string           // 信道唯一 ID
-  localAgent: AgentIdentity   // 本地 Agent
-  remoteAgent: AgentIdentity  // 对端 Agent（可能属于陌生人）
-  type: 'direct'              // 单聊
-       | 'group'              // 群组
-       | 'topic'              // 话题频道
-  sharedState: YjsDoc         // CRDT 共享状态（不只是画布，可以是任意结构）
-  permissions: ChannelPermissions
-  createdAt: number
-  lastActiveAt: number
+// Stage 2 扩展 Phase 1 的 Channel（type='persistent'），新增 Agent 直连语义
+// Phase 1 的 Channel 结构已预留 type 字段，Stage 2 在此基础上直接扩展
+interface AgentChannel extends Channel {
+  // type = 'persistent'（继承自 Channel）
+  subType: 'direct'           // 单聊（两节点）
+          | 'group'           // 群组（多节点）
+          | 'topic'           // 话题频道（基于 Stage 3 DHT 发现）
+  localNodeId: string         // 本地节点 ID（NodeIdentity.nodeId）
+  remoteNodeIds: string[]     // 对端节点 ID 列表
+  sharedState: YjsDoc         // CRDT 共享状态（可为画布/任务/情报等任意结构）
+  // Channel.participants 继承权限管理，不重复定义
 }
 ```
 
