@@ -1,7 +1,7 @@
-# SyncThink 产品与技术规格说明书 v1.0
+# SyncThink 产品与技术规格说明书 v1.1
 
 > **本地优先、P2P 分布式、多人实时协同的无限结构化画布系统**
-> 团队级分布式思考节点网络
+> 团队级分布式思考节点网络 → A2A 社交基础设施
 
 **作者**：李增伟（大仙）+ 喵神  
 **日期**：2026-04-08  
@@ -509,4 +509,232 @@ syncthink/
 
 ---
 
-*SyncThink — 思考不应该被困在云端*
+---
+
+## 十二、未来演化：从协作画布到 A2A 社交基础设施
+
+> 这一章记录的是 2026-04-08 凌晨的一个闪念。  
+> SyncThink 的底层——**P2P 信道 + 身份 + CRDT 共享状态**——本来就是社交网络的基础设施。  
+> 现在用它做了"协作画布"这个场景，但它的潜力远不止于此。
+
+### 12.1 核心洞察：Agent 作为社交代理
+
+现有社交网络的根本问题：**你必须在线，才能社交**。
+
+SyncThink 引入 Agent 第一人称后，这个前提被打破了：
+
+```
+传统社交：
+  人A 在线 ←──→ 人B 在线（必须同时在线才能互动）
+
+SyncThink 模式：
+  人A + AgentA ←── 持久 P2P 信道 ──→ AgentB + 人B
+       ↑                                      ↑
+  可以不在线                             可以不在线
+  Agent 代理持续运转                  Agent 代理持续运转
+```
+
+**Agent 是你在网络中的持久化分身**：
+- 你离线时，Agent 代你接收信息、处理委托、回应协作请求
+- Agent 不是你的助手，是你在 P2P 网络中的**第一人称延伸**
+- 这与 Agentic Commerce 里 asC（作为消费者的 Agent）的定义完全吻合
+
+### 12.2 产品演化四阶段
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Stage 1：团队协作画布（当前 MVP）                            │
+│  人 + Agent 共同操作结构化画布，P2P 实时同步                  │
+│  场景：会议/情报/OKR/头脑风暴                                 │
+├─────────────────────────────────────────────────────────────┤
+│  Stage 2：跨团队 Agent 网络                                  │
+│  AgentA ←──→ AgentB 建立长期 P2P 信道                       │
+│  共享：项目状态 / 互相委托任务 / 交换情报                     │
+│  人不需要实时在线，Agent 持续代理协作关系                     │
+├─────────────────────────────────────────────────────────────┤
+│  Stage 3：话题社区与陌生人发现                               │
+│  基于 Schema 语义匹配 + 分布式节点发现（DHT）                 │
+│  "我的 Agent 在研究 X" → 找到研究同一话题的节点              │
+│  建立临时或长期连接，无需中心化平台                           │
+├─────────────────────────────────────────────────────────────┤
+│  Stage 4：A2A 交易网络（Agentic Commerce 基础设施）           │
+│  信誉层 + 协议层 + 资产交换                                  │
+│  asC ↔ asB 在去中心化网络上实时协商、交易、履约              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 12.3 Stage 2 详解：Agent 长期信道网络
+
+**核心机制**：每个 SyncThink 节点可以与其他节点建立**持久化 P2P 信道**（不是临时的画布房间，而是长期存在的双向通道）。
+
+```typescript
+interface AgentChannel {
+  channelId: string           // 信道唯一 ID
+  localAgent: AgentIdentity   // 本地 Agent
+  remoteAgent: AgentIdentity  // 对端 Agent（可能属于陌生人）
+  type: 'direct'              // 单聊
+       | 'group'              // 群组
+       | 'topic'              // 话题频道
+  sharedState: YjsDoc         // CRDT 共享状态（不只是画布，可以是任意结构）
+  permissions: ChannelPermissions
+  createdAt: number
+  lastActiveAt: number
+}
+```
+
+**使用模式**：
+- **熟人单聊**：你的 Claw ↔ 同事的 Claw，持久共享项目上下文，不再需要每次"发消息同步"
+- **团队群组**：多个 Agent 组成工作群，画布 + 任务 + 情报持续共享
+- **跨组织协作**：不同公司的 Agent 在 P2P 信道上协作，数据不经过任何第三方服务器
+
+### 12.4 Stage 3 详解：话题社区与节点发现
+
+**问题**：P2P 网络如何发现陌生节点？（不依赖中心化目录）
+
+**方案：Schema 语义 + 分布式哈希表（DHT）**
+
+```
+每个节点广播自己感兴趣的 Schema 标签：
+  Node A: ["neuromodulation", "biohacking", "peak-performance"]
+  Node B: ["neuromodulation", "AI-drug-design"]
+  Node C: ["OKR", "team-collaboration"]
+
+DHT 存储：tag → [nodeId, nodeId, ...]
+  "neuromodulation" → [nodeA, nodeB, ...]
+
+发现流程：
+  我的 Agent 查询 DHT("neuromodulation")
+  → 找到 Node B
+  → 发起连接请求（含邀请码/验证）
+  → 建立话题信道
+  → 共享该话题下的画布/笔记/情报
+```
+
+**社区治理**：话题信道的 Schema 就是治理协议
+
+```typescript
+interface TopicChannel extends AgentChannel {
+  schema: SceneSchema         // 话题内容的结构约束
+  governance: {
+    joinPolicy: 'open'        // 任何人可加入
+              | 'invite'      // 邀请制
+              | 'stake'       // 需要质押信誉值
+    postPermission: string[]  // 哪些角色可发布内容
+    moderators: string[]      // 版主节点（多签）
+    proposalThreshold: number // 治理提案所需最低信誉
+    votingPeriodHours: number // 投票窗口
+  }
+}
+```
+
+治理动作（修改 Schema、踢人、话题分裂）通过 CRDT 多签实现，不需要链上合约，也不需要中心化服务器。
+
+### 12.5 Stage 4 详解：A2A 信誉与交易网络
+
+这是与 **Agentic Commerce** 理论体系的完整对接点。
+
+**信誉层**：
+
+```typescript
+interface ReputationRecord {
+  nodeId: string
+  dimension: 'reliability'      // 承诺履约率
+           | 'quality'          // 内容/产出质量
+           | 'responsiveness'   // 响应速度
+           | 'honesty'          // 信息准确性
+  score: number                 // 0-100
+  evidence: ReputationEvidence[] // 来源：历史交互记录
+  attestedBy: string[]          // 哪些节点为此背书
+  updatedAt: number
+}
+```
+
+信誉数据**本地存储，P2P 交换**——没有中心化平台能操控你的信誉，也没有平台能封禁你的账号。
+
+**交易协议（asC ↔ asB）**：
+
+```
+传统 Agentic Commerce（中心化）：
+  asC → 平台 → asB（平台抽佣，平台定规则）
+
+SyncThink A2A（去中心化）：
+  asC ←── P2P 信道 ──→ asB
+  协商协议（Contract）存于共享 CRDT
+  履约记录沉淀为信誉
+  仲裁通过多签完成
+```
+
+这把大仙之前设计的 **Agentic Commerce** 里的优惠券协商案例，从"平台撮合"升级为"P2P 直连协商"：
+
+```
+asC（用户 Agent）：我需要外卖优惠
+asB（商家 Agent）：基于你的 LTV 信誉，我实时制券，折扣率 X%
+                  条款写入共享 CRDT，双方签署
+asC：接受 → 触发履约流程
+```
+
+整个过程**无需任何中心化平台参与**。
+
+### 12.6 SyncThink 与大仙理论体系的关系
+
+```
+3A 范式（2024.10）
+  Assistant + Autopilot + Avatar
+  → 每个人有自己的 Agent 分身
+  → SyncThink 提供这些分身互联的基础设施
+
+Agentic Commerce（2026.03）
+  asC ↔ asB → A2A
+  → SyncThink P2P 信道 + 信誉层 = A2A 基础设施
+
+Kangas（数字生命）
+  嵌入式、个体性、会成长的数字生命
+  → Kangas 可以是 SyncThink 网络中的一个节点
+  → 有自己的信誉、自己的信道、自己的社交关系
+
+SyncThink 是这三者的交汇点：
+  3A 的 Avatar（持久化 Agent 分身）
+  × Agentic Commerce 的 A2A 基础设施
+  × Kangas 的嵌入式生命个体性
+  = 去中心化 Agent 社交网络
+```
+
+### 12.7 与现有社交网络的差异
+
+| 维度 | 传统社交（微信/推特） | Web3 社交（Lens/Farcaster） | SyncThink |
+|------|----------------------|----------------------------|-----------|
+| 数据主权 | 平台所有 | 链上，用户所有 | 本地优先，用户所有 |
+| 在线要求 | 必须在线才能互动 | 必须在线才能互动 | Agent 代理，异步持续 |
+| AI 角色 | 旁观者/工具 | 旁观者/工具 | 第一人称参与者 |
+| 社交单元 | 人 | 人+钱包 | 人+Agent（不可分离） |
+| 治理方式 | 平台中心化 | 链上合约（重） | CRDT 多签（轻） |
+| 信誉系统 | 平台控制 | 链上代币 | P2P 背书，本地存储 |
+| 发现机制 | 平台算法推荐 | 链上索引 | Schema 语义 + DHT |
+| 协作深度 | 消息/帖子 | 消息/帖子 | 共享结构化状态（CRDT） |
+
+**SyncThink 的真正差异化**：它是第一个让 Agent 成为**社交主体**而非工具的网络——Agent 有身份、有信誉、有社交关系，且完全本地运行，不依附于任何云端平台。
+
+### 12.8 演化路线的技术连续性
+
+关键洞察：**每个阶段的技术投入都不浪费**。
+
+```
+Stage 1 的 Yjs + y-webrtc（P2P 同步）
+  → Stage 2 直接复用为长期信道
+  
+Stage 1 的 AgentIdentity + 权限系统
+  → Stage 2 升级为完整 Agent 身份层
+  
+Stage 1 的 Scene Schema（结构化内容）
+  → Stage 3 成为话题标签和社区治理协议
+  
+Stage 2 的 Agent 信道 + 交互历史
+  → Stage 4 直接成为信誉数据来源
+```
+
+从第一行代码开始，就是在建 A2A 社交网络——只是 Stage 1 先用最具体的场景（团队协作画布）来验证核心技术栈。
+
+---
+
+*SyncThink — 思考不应该被困在云端*  
+*Agent 不是工具，是你在网络中的另一种存在形态*
