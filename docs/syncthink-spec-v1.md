@@ -1,4 +1,4 @@
-# SyncThink 产品与技术规格说明书 v1.1
+# SyncThink 产品与技术规格说明书 v1.2
 
 > **本地优先、P2P 分布式、多人实时协同的无限结构化画布系统**
 > 团队级分布式思考节点网络 → A2A 社交基础设施
@@ -196,27 +196,44 @@ interface SyncThinkCard extends TLBaseShape {
 }
 ```
 
-### 5.3 成员与身份
+### 5.3 节点身份（Node Identity）— A2A 网络基础
+
+**设计原则：自主主权身份（Self-Sovereign Identity）**
+- 首次启动自动生成，持久化存储于 IndexedDB，永不变更
+- 不依赖任何中心化 PKI 或区块链
+- `nodeId = SHA-256(publicKey)`，全网唯一，可验证
+- 私钥只存本地 keystore，永不序列化，永不传输
 
 ```typescript
-// 人类成员
-interface RoomMember {
-  peerId: string
-  displayName: string
-  color: string                         // 光标颜色（自动分配）
+// ⭐ 核心：持久化节点身份（首次启动生成，IndexedDB 存储）
+interface NodeIdentity {
+  nodeId: string          // SHA-256(publicKey)，全局唯一标识
+  publicKey: string       // Ed25519 公钥（hex），可公开分享
+  displayName: string     // 人类可读名称
+  avatarColor: string     // 光标颜色（派生自 nodeId，固定不变）
+  createdAt: number
+  version: string         // 身份版本，支持未来密钥轮换
+  // 注：私钥存于独立 keystore，不在此结构中
+}
+
+// 人类成员（在某个 Channel 中的角色）
+interface ChannelMember {
+  nodeId: string                        // 关联到 NodeIdentity
+  displayName: string                   // 可覆盖，Channel 内有效
+  color: string                         // 光标颜色
   role: 'owner' | 'editor' | 'viewer'
   permissions: MemberPermissions
   joinedAt: number
   isOnline: boolean
 }
 
-// Agent 身份（与人类成员平级，但有独立标识）
+// Agent 身份（与人类成员平级，是网络中的第一人称参与者）
 interface AgentIdentity {
-  agentId: string                       // "openclaw-lizengwei02"
+  nodeId: string                        // Agent 自身的 NodeIdentity ID
   displayName: string                   // "增伟的 Claw 🤖"
   color: string                         // "#20c4cb"（区别于人类）
   isAgent: true
-  ownerPeerId: string                   // 属于哪个人类成员
+  ownerNodeId: string                   // 属于哪个人类节点
   capabilities: AgentCapabilities
 }
 
@@ -237,24 +254,81 @@ interface AgentCapabilities {
 }
 ```
 
+**Phase 1 实现**：
+```typescript
+// 启动时执行一次
+async function initNodeIdentity(): Promise<NodeIdentity> {
+  const existing = await db.get('node_identity')
+  if (existing) return existing
+
+  // 生成 Ed25519 密钥对（使用 @noble/ed25519）
+  const privateKey = ed.utils.randomPrivateKey()
+  const publicKey = await ed.getPublicKeyAsync(privateKey)
+  const nodeId = sha256hex(publicKey)
+
+  // 私钥存入独立 keystore（不混入普通 DB）
+  await keystore.set('ed25519_private', privateKey)
+
+  const identity: NodeIdentity = {
+    nodeId,
+    publicKey: hex(publicKey),
+    displayName: 'My Node',
+    avatarColor: deriveColor(nodeId),
+    createdAt: Date.now(),
+    version: '1',
+  }
+  await db.set('node_identity', identity)
+  return identity
+}
+```
+
 ---
 
 ## 六、准入权限体系
 
+### 6.0 Channel 抽象（核心概念）
+
+**所有协作空间统一抽象为 Channel**，不再使用"房间（Room）"概念。Channel 是 A2A 网络的基本信道单元。
+
+```typescript
+interface Channel {
+  channelId: string
+  type: 'session'       // 临时会话（Phase 1 实现）
+       | 'persistent'   // 持久信道（Stage 2 实现，结构已预留）
+  name: string
+  sceneSchemaId: string // 关联的场景模式
+  ownerNodeId: string   // 创建者节点 ID
+  participants: ChannelMember[]
+  sharedStateId: string // Yjs Doc ID（与 channelId 相同）
+  inviteCode?: string   // 邀请码（有效期内存在）
+  createdAt: number
+  lastActiveAt: number
+  // Phase 1 只实现 type='session'，但结构已为 persistent 完整预留
+}
+```
+
+**为什么不叫 Room**：
+- Room 隐含"临时性"——会议结束即解散
+- Channel 隐含"持久性"——可以长期存在，异步使用
+- Phase 1 的 session channel 在用户主动关闭前持续存在，可随时重新加入
+- Stage 2 的 persistent channel 不依赖信令，直接 P2P 保活
+
 ### 6.1 两层准入
 
-**层1：房间准入（谁能加入）**
+**层1：Channel 准入（谁能加入）**
 
 ```
-1. 房主创建房间 → 生成 房间ID（UUID v4+随机128位）+ 邀请码（12位字符）
-2. 房主分享邀请码给指定成员（自己决定通过什么渠道传递）
+1. 创建者建立 Channel → 生成 channelId（UUID v4+随机128位）+ 邀请码（12位字符）
+2. 创建者分享邀请码给指定成员（自己决定通过什么渠道传递）
 3. 成员输入邀请码 → P2P 握手验证（客户端间直接验证，不经过信令服务器）
+   验证报文：{ inviteCode, requesterNodeId, signature }  ← 用 Ed25519 私钥签名
 4. 验证通过 → 分配角色权限，加入 Yjs 同步
 5. 验证失败 → 断开连接，Yjs Doc 不共享
 
 即便知道信令服务器地址：
-  → 不知道房间ID → 无法找到房间
-  → 知道房间ID 但没有邀请码 → P2P 验证失败，无法获取 Yjs 数据
+  → 不知道 channelId → 无法找到 Channel
+  → 知道 channelId 但没有邀请码 → P2P 验证失败，无法获取 Yjs 数据
+  → 伪造 requesterNodeId → 签名验证失败（没有对应私钥）
 ```
 
 **层2：操作权限（能做什么）**
@@ -292,25 +366,57 @@ Agent Skill 连接的是本地 ws://localhost:9527
 
 **本地 WebSocket 服务，默认端口 `9527`，随 SyncThink 客户端启动自动运行。**
 
+### 7.0 鉴权机制：Ed25519 签名（Phase 1 起）
+
+**设计原则**：不用 token（会话级，重启失效），改用节点身份签名（永久有效，可跨节点验证）。
+
+```
+每个 API 请求携带：
+  Header: X-Node-Id: <nodeId>
+  Header: X-Timestamp: <unix_ms>            ← 防重放（5分钟窗口）
+  Header: X-Signature: <ed25519_sig_hex>    ← sign(body + timestamp, privateKey)
+
+服务端验证：
+  1. 查询 nodeId 是否已注册（/agent/register 时录入公钥）
+  2. 验证时间戳（|now - timestamp| < 5min）
+  3. 用对应公钥验证签名
+  4. 验证通过 → 执行操作，拒绝 → 401
+
+Phase 1：只验证本地节点（ownerNodeId 必须是本节点）
+Stage 2：可验证任意远端节点签名（同样机制，不需改接口）
+```
+
+**签名工具**（`@noble/ed25519`，4KB，零依赖）：
+```typescript
+// Agent 发请求
+const body = JSON.stringify(payload)
+const msg = body + headers['X-Timestamp']
+const sig = await ed.signAsync(utf8(msg), privateKey)
+headers['X-Signature'] = hex(sig)
+
+// 服务端验证
+const valid = await ed.verifyAsync(sig, utf8(msg), publicKey)
+```
+
 ### 7.1 HTTP API
 
 ```
-# 读取
+# 读取（无需签名）
 GET  /canvas/elements                 获取所有画布元素
 GET  /canvas/elements?type=agenda     按卡片类型过滤
 GET  /canvas/scene                    获取当前场景模式及 Schema
 GET  /canvas/summary                  获取 Agent 友好的文本摘要
 GET  /canvas/members                  获取在线成员列表
 
-# 写入（需 Agent token）
+# 写入（需签名）
 POST   /canvas/cards                  新增卡片（带 AgentIdentity 标识）
 PATCH  /canvas/cards/:id              修改卡片字段
 POST   /canvas/connections            新增连线
 DELETE /canvas/cards/:id              删除卡片（需权限）
 
-# 管理
-GET  /agent/status                    查询 Agent 接入状态
-POST /agent/register                  注册 Agent（返回 token）
+# Agent 注册与管理
+POST /agent/register                  注册 Agent（提交 nodeId + publicKey）
+GET  /agent/status                    查询 Agent 状态与权限
 ```
 
 ### 7.2 WebSocket 实时监听
@@ -323,9 +429,10 @@ WS /canvas/watch
   card_updated      { cardId: string, changes: Partial<Props> }
   card_deleted      { cardId: string }
   connection_added  { connection: Connection }
-  user_joined       { member: RoomMember }
-  user_left         { peerId: string }
+  member_joined     { member: ChannelMember }
+  member_left       { nodeId: string }
   agent_action      { agentId: string, action: string, pending: boolean }
+  interaction_log   { record: InteractionRecord }   ← Phase 1 新增
 ```
 
 ### 7.3 Skill 封装（OpenClaw / Claude Code）
@@ -333,12 +440,81 @@ WS /canvas/watch
 ```
 syncthink-skill 能力清单（可按需开启）：
   read_canvas       - 读取画布内容/摘要
-  add_card          - 新增卡片（带 AgentIdentity）
+  add_card          - 新增卡片（带 AgentIdentity，含签名）
   update_card       - 修改卡片
   add_connection    - 新增连线
   watch_canvas      - 监听变化（轮询 or SSE）
   get_scene_schema  - 获取当前场景 Schema 约束
   summarize         - 生成画布摘要（直接调用 AI 处理后返回）
+  get_interactions  - 查询本地 Interaction Log（Phase 1 新增）
+```
+
+---
+
+## 七点五、Interaction Log — 信誉层原材料
+
+> Phase 1 只记录，不使用。Stage 4 信誉系统直接基于此数据构建，无需迁移。
+
+### 7.5.1 设计目标
+
+信誉系统需要的原材料是**语义化的交互历史**：谁、在什么时间、做了什么、对方如何评价。
+
+如果 Phase 1 不记录，Stage 4 开始时信誉从零起步——所有早期用户的历史协作数据全部丢失。
+
+### 7.5.2 数据结构
+
+```typescript
+interface InteractionRecord {
+  id: string                  // 本地唯一 ID
+  channelId: string           // 发生在哪个 Channel
+  sessionId: string           // 发生在哪次会话（Channel 可多次使用）
+  counterpartNodeId: string   // 交互对象的节点 ID（人或 Agent）
+  actionType:
+    | 'card_created'          // 创建了卡片
+    | 'card_confirmed'        // 确认了对方的卡片（认可）
+    | 'action_completed'      // 完成了行动项
+    | 'action_delegated'      // 委托了任务
+    | 'scene_contributed'     // 对场景 Schema 有实质贡献
+    | 'agent_assisted'        // Agent 辅助了协作（被采用）
+    | 'agent_ignored'         // Agent 建议未被采用
+  quality?: number            // 0-1，可选，Phase 2 由 Agent 自动评估
+  metadata?: Record<string, unknown>  // 扩展字段
+  timestamp: number
+  isPrivate: true             // 始终为 true，永不自动同步给对端
+}
+```
+
+### 7.5.3 存储与访问
+
+```
+存储：IndexedDB（本地私有库，独立于 Yjs Doc）
+索引：counterpartNodeId + timestamp（为未来信誉聚合优化）
+访问：仅本地 Agent 通过 /agent/interactions 读取
+共享：永不自动共享；Stage 4 用户主动授权后可选择性共享部分记录作为信誉证明
+```
+
+### 7.5.4 Phase 1 记录时机
+
+```
+触发记录的事件（自动，无需用户操作）：
+  ✓ 本地用户/Agent 创建卡片 → card_created
+  ✓ 本地用户点击"确认"对方的决议卡 → card_confirmed
+  ✓ 行动项状态变为 completed → action_completed
+  ✓ Agent 建议被采用（用户点击接受）→ agent_assisted
+  ✓ Agent 建议被忽略（超时未响应）→ agent_ignored
+```
+
+### 7.5.5 与 Stage 4 信誉系统的接口
+
+```typescript
+// Stage 4 将新增（Phase 1 无需实现）
+async function computeReputation(
+  counterpartNodeId: string
+): Promise<ReputationScore> {
+  const records = await db.getInteractions(counterpartNodeId)
+  // 基于历史记录聚合信誉分
+  // Phase 1 已积累的数据直接可用，零迁移成本
+}
 ```
 
 ---
@@ -426,32 +602,79 @@ Agent 能力：
 
 ## 九、开发路线图
 
-### Phase 1 — MVP（目标：团队能用起来，预计 ~12h）
+### Phase 1 — MVP（目标：A2A 网络节点 v0 + 团队能用起来，预计 ~17h）
+
+#### 基础设施（A2A 网络地基）
 
 | 任务 | 优先级 | 估时 | 说明 |
 |------|--------|------|------|
 | 项目脚手架（Vite + React + TS + pnpm monorepo） | P0 | 0.5h | |
-| tldraw 基础集成 | P0 | 1h | 自定义 SyncThinkCard Shape |
+| **NodeIdentity 持久化身份**（Ed25519 + IndexedDB） | **P0** | **0.5h** | **A2A 基础，首次启动自动生成** |
 | Yjs + y-webrtc 多人同步 | P0 | 2h | 核心同步逻辑 |
 | y-indexeddb 本地持久化 | P0 | 0.5h | |
+| **Channel 抽象**（替代 Room，含 type 字段预留） | **P0** | **0.5h** | **持久信道语义，Stage 2 零返工** |
+
+#### 画布功能
+
+| 任务 | 优先级 | 估时 | 说明 |
+|------|--------|------|------|
+| tldraw 基础集成 | P0 | 1h | 自定义 SyncThinkCard Shape |
 | 自由模式画布 | P0 | 1h | 不受场景约束 |
-| 房间创建/加入 UI + 邀请码机制 | P1 | 1.5h | 准入第一层 |
+| Channel 创建/加入 UI + 邀请码机制 | P1 | 1.5h | 邀请码含 nodeId 签名验证 |
 | 会议讨论场景模式（强约束） | P1 | 3h | 第一个场景 Schema 落地 |
+
+#### Agent 接入层
+
+| 任务 | 优先级 | 估时 | 说明 |
+|------|--------|------|------|
+| **Agent API 签名鉴权**（Ed25519，`@noble/ed25519`） | **P1** | **1.5h** | **鉴权一次做对，Stage 2 直接扩展** |
 | Agent 本地 WS 接口（读+写） | P1 | 2h | localhost:9527 |
 | AgentIdentity 光标 + 卡片标识 | P1 | 1h | 区分人/Agent 操作 |
+| **Interaction Log**（IndexedDB 本地记录，Phase 1 只记不用） | **P1** | **1h** | **信誉原材料，Stage 4 直接复用** |
+
+#### 基础设施
+
+| 任务 | 优先级 | 估时 | 说明 |
+|------|--------|------|------|
 | 信令服务器配置（apps/signaling） | P1 | 0.5h | 极简 Node |
-| **合计** | | **~13h** | |
+
+#### 汇总
+
+| 类别 | 估时 |
+|------|------|
+| 原有任务 | ~13h |
+| **新增 A2A 基础（4项）** | **~3.5h** |
+| **Phase 1 总计** | **~16.5h** |
+
+> **新增 4 项的价值**：Phase 1 建出来的不是"一个协作工具"，而是 **A2A 网络的第一个节点**。身份、信道抽象、签名鉴权、交互历史——这四块是整个 A2A 演化路径的地基，现在不加，后面全部返工。
 
 ### Phase 2 — 完整产品
 
 - 完整四大场景模式
-- 角色权限系统完整实现
+- 角色权限系统完整实现（踢人/变更权限 UI）
 - 用户自定义 + 发布 Schema（场景市场）
 - Agent 写入确认机制（人工审批流）
 - syncthink-skill 打包（OpenClaw + Claude Code 双版本）
 - Tauri 桌面端打包（自带本地 WS，更贴合 Claw 本地运行）
 - 画布快照 / 历史回放
-- 成员管理 UI（踢人/变更权限）
+- Interaction Log quality 字段自动评估（Agent 打分）
+
+### Stage 2 — Agent 长期信道网络（Phase 1 基础设施直接支撑）
+
+- persistent Channel 实现（Channel.type = 'persistent'，结构已在 Phase 1 预留）
+- 跨 Channel Agent 委托（不需要改身份层/鉴权层）
+- 异步消息队列（人离线时 Agent 代理接收）
+
+### Stage 3 — 话题社区
+
+- Schema 语义标签 + DHT 节点发现
+- 话题 Channel + 社区治理（CRDT 多签）
+
+### Stage 4 — A2A 信誉与交易网络
+
+- 基于 InteractionRecord 聚合信誉分（Phase 1 数据直接可用）
+- asC ↔ asB P2P 协商协议
+- 信誉 P2P 交换与背书
 
 ---
 
@@ -462,21 +685,31 @@ syncthink/
 ├── apps/
 │   ├── web/                        # 主前端应用（React + tldraw）
 │   │   ├── src/
+│   │   │   ├── identity/           # ⭐ NodeIdentity（Ed25519 生成/持久化）
+│   │   │   │   ├── nodeIdentity.ts # 首次启动生成，IndexedDB 存储
+│   │   │   │   └── keystore.ts     # 私钥独立存储（不混入普通 DB）
+│   │   │   ├── channel/            # ⭐ Channel 抽象（替代 Room）
+│   │   │   │   ├── channel.ts      # Channel 类型定义 + CRUD
+│   │   │   │   └── invite.ts       # 邀请码生成/验证（含签名）
 │   │   │   ├── canvas/             # tldraw 画布核心
 │   │   │   │   ├── shapes/         # 自定义 Shape（SyncThinkCard 等）
 │   │   │   │   └── tools/          # 自定义 Tool
 │   │   │   ├── scenes/             # 场景模式加载 + Schema 验证
 │   │   │   ├── sync/               # Yjs + y-webrtc 同步逻辑
 │   │   │   ├── agent/              # Agent 接入层（WS Server + API）
-│   │   │   ├── auth/               # 邀请码 + 权限验证
-│   │   │   └── components/         # UI 组件（Room/Member/Toolbar 等）
+│   │   │   │   ├── server.ts       # localhost:9527 HTTP + WS
+│   │   │   │   ├── auth.ts         # ⭐ Ed25519 签名验证中间件
+│   │   │   │   └── register.ts     # Agent 注册（nodeId + publicKey）
+│   │   │   ├── interaction/        # ⭐ Interaction Log
+│   │   │   │   └── log.ts          # 本地记录，IndexedDB，永不自动同步
+│   │   │   └── components/         # UI 组件（Channel/Member/Toolbar 等）
 │   │   ├── package.json
 │   │   └── vite.config.ts
 │   └── signaling/                  # 信令服务器（极简）
 │       ├── index.ts
 │       └── package.json
 ├── packages/
-│   └── schema/                     # Scene Schema 类型定义（共享）
+│   └── schema/                     # Scene Schema + Channel 类型定义（共享）
 │       ├── types.ts
 │       └── validators.ts
 ├── scenes/                         # 内置场景 Schema JSON
@@ -485,7 +718,8 @@ syncthink/
 │   ├── okr-v1.json
 │   └── brainstorm-v1.json
 ├── docs/
-│   └── syncthink-design.md         # 技术设计文档（详版）
+│   ├── syncthink-design.md         # 技术设计文档（详版）
+│   └── syncthink-spec-v1.md        # 产品与技术规格说明书（本文档）
 ├── pnpm-workspace.yaml
 ├── package.json
 └── README.md
@@ -505,7 +739,11 @@ syncthink/
 | Agent 身份 | 第一人称参与者 | 差异化核心，区别于所有现有工具 |
 | Agent 接入 | 本地 WS localhost:9527 | 不暴露外网，安全，Skill 化接入 |
 | 桌面端 | Tauri（Phase 2） | 比 Electron 轻，本地 WS 更自然 |
-| 邀请码 | 12位随机+一次性 | 安全且简单，不依赖中心验证 |
+| 邀请码 | 12位随机+签名验证 | 安全且简单，签名绑定 NodeIdentity |
+| **节点身份** | **Ed25519 自主主权** | **不依赖 PKI/链，Phase 1 零成本，A2A 全链路基础** |
+| **协作单元** | **Channel（非 Room）** | **持久信道语义，Stage 2 persistent 类型零返工** |
+| **API 鉴权** | **Ed25519 签名（非 token）** | **永久有效，可跨节点验证，一次做对** |
+| **交互历史** | **本地 IndexedDB，Phase 1 只记** | **信誉原材料，Stage 4 直接复用，零迁移成本** |
 
 ---
 
