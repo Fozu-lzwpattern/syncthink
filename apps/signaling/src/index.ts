@@ -1,5 +1,5 @@
 /**
- * SyncThink 信令服务器 v0.3.0 (Phase 3 + TLS 自动化)
+ * SyncThink 信令服务器 v0.4.0 (Phase 3 + TLS + Agent API)
  *
  * 职责（纯中转，Zero Trust）：
  * - WebSocket 消息转发：subscribe / unsubscribe / publish
@@ -7,6 +7,7 @@
  * - 时间戳防重放（±30s 窗口）
  * - join 事件审计日志（谁在什么时间加入了哪个 room）
  * - HTTP/HTTPS 健康检查端点
+ * - Agent API（port 9527）：HTTP + WS，供外部 AI Agent 程序化操作画布
  *
  * TLS 自动化（三层兜底，零用户感知）：
  * - 层1：WSS_CERT + WSS_KEY 环境变量（手动配置优先）
@@ -28,6 +29,7 @@
 
 import * as WebSocket from 'ws'
 import { autoTLS, createServer, getPort, getProtocol } from './tls'
+import { startAgentApi } from './agentApi'
 
 // ─── 配置 ───────────────────────────────────────────────────────────────────
 
@@ -113,6 +115,9 @@ function hexToBytes(hex: string): Uint8Array {
 
 const rooms = new Map<string, Set<WebSocket.WebSocket>>()
 const auditLog = new Map<string, { roomId: string; joinedAt: number; publicKey: string }>()
+
+/** Agent API 服务器引用（用于 agent_event 转发） */
+let agentApiServer: ReturnType<typeof startAgentApi> | null = null
 
 function getOrCreateRoom(name: string): Set<WebSocket.WebSocket> {
   if (!rooms.has(name)) rooms.set(name, new Set())
@@ -227,13 +232,23 @@ async function main() {
           if (rooms.get(topic)?.size === 0) rooms.delete(topic)
         }
       } else if (yjsMsg.type === 'publish' && yjsMsg.topic) {
+        const rawStr = raw.toString()
+
+        // ── syncthink:agent_event — 浏览器 tab 推送画布事件给外部 Agent ──
+        // 截获并转发给 Agent API 的 watchers（不影响 y-webrtc 广播）
+        try {
+          const parsed = JSON.parse(rawStr)
+          if (parsed.type === 'syncthink:agent_event' && parsed.channelId) {
+            agentApiServer?.forwardAgentEvent?.(parsed.channelId, rawStr)
+          }
+        } catch { /* 忽略解析失败 */ }
+
         const room = rooms.get(yjsMsg.topic)
         if (room) {
-          const data = raw.toString()
           let forwarded = 0
           room.forEach((peer: WebSocket.WebSocket) => {
             if (peer !== ws && peer.readyState === WebSocket.OPEN) {
-              peer.send(data)
+              peer.send(rawStr)
               forwarded++
             }
           })
@@ -265,7 +280,7 @@ async function main() {
   server.listen(PORT, HOST, () => {
     console.log('')
     console.log(`  ╔═══════════════════════════════════════╗`)
-    console.log(`  ║  ⟁  SyncThink Signaling  v0.3.0     ║`)
+    console.log(`  ║  ⟁  SyncThink Signaling  v0.4.0     ║`)
     console.log(`  ╚═══════════════════════════════════════╝`)
     console.log('')
     console.log(`  ${protocol.toUpperCase()} ✅  ${protocol}://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
@@ -292,6 +307,15 @@ async function main() {
       console.log(`  ⚠️   AUTH_REQUIRED=false (dev mode) — 生产环境建议设为 true`)
       console.log('')
     }
+
+    // 启动 Agent API（port 9527）
+    const AGENT_API_PORT = process.env.AGENT_API_PORT ? Number(process.env.AGENT_API_PORT) : 9527
+    agentApiServer = startAgentApi({
+      rooms,
+      verbose: VERBOSE,
+      port: AGENT_API_PORT,
+      host: '127.0.0.1',
+    })
   })
 }
 

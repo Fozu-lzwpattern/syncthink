@@ -14,6 +14,7 @@ import { joinChannel, getChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
 import { agentBridge, type AgentCommand, type ConversationAppendData } from '../agent/server'
+import { AgentWsClient } from '../agent/wsClient'
 import type { ConversationMessage, ConversationShapeProps } from '../shapes/ConversationShape'
 import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServicesShape'
 import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
@@ -140,6 +141,10 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   useEffect(() => {
     let destroyed = false
 
+    // Agent WS Client（连 signaling，接收 localhost:9527 转发来的 Agent 指令）
+    const wsClient = new AgentWsClient({ channelId, verbose: false })
+    wsClient.start()
+
     async function init() {
       // 确保本地 Channel 记录存在
       await joinChannel(channelId, identity)
@@ -176,6 +181,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
     return () => {
       destroyed = true
+      wsClient.destroy()
       cleanupPromise.then((cleanup) => cleanup?.())
       adapterRef.current?.destroy()
       adapterRef.current = null
