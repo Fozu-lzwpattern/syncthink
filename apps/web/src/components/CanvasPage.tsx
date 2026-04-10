@@ -9,10 +9,14 @@ import { Tldraw, type Editor, createShapeId } from '@tldraw/tldraw'
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter } from '../sync/adapter'
-import { joinChannel } from '../channel/channel'
+import { joinChannel, getChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction } from '../interaction/log'
 import { agentBridge, type AgentCommand } from '../agent/server'
+import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServicesShape'
+import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
+
+const CUSTOM_SHAPE_UTILS = [LocalServicesCardShapeUtil]
 
 interface Props {
   channelId: string
@@ -74,6 +78,13 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
+
+    // 本地生活服务场景初始化
+    getChannel(channelId).then((ch) => {
+      if (ch?.sceneId === 'local-services-v1') {
+        initLocalServicesScene(editor)
+      }
+    })
 
     // 监听 Agent 指令（来自 BroadcastChannel / localhost:9527）
     const handleAgentCommand = (e: Event) => {
@@ -186,6 +197,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         {adapter && (
           <Tldraw
             store={adapter.store}
+            shapeUtils={CUSTOM_SHAPE_UTILS}
             onMount={handleMount as (editor: Editor) => void}
           />
         )}

@@ -7,8 +7,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { NodeIdentity } from '../identity/types'
 import type { Channel } from '../channel/types'
-import { createChannel, joinChannel, listChannels } from '../channel/channel'
+import { createChannel, joinChannel, listChannels, getChannel } from '../channel/channel'
 import { recordInteraction } from '../interaction/log'
+
+const LOCAL_SERVICES_CHANNEL_ID = 'local-services-01'
 
 interface Props {
   identity: NodeIdentity
@@ -24,8 +26,30 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [loading, setLoading] = useState(false)
 
   const loadChannels = useCallback(async () => {
+    // 确保本地生活服务默认 Channel 存在
+    const lsExists = await getChannel(LOCAL_SERVICES_CHANNEL_ID)
+    if (!lsExists) {
+      const ch: Channel = {
+        channelId: LOCAL_SERVICES_CHANNEL_ID,
+        type: 'persistent',
+        name: '🍱 本地生活服务',
+        ownerNodeId: 'asb-meituan-mock',
+        createdAt: Date.now(),
+        members: [],
+        sceneId: 'local-services-v1',
+        metadata: { builtIn: true, serviceType: 'all' },
+      }
+      const { db } = await import('../lib/db')
+      await db.set(`channel:${LOCAL_SERVICES_CHANNEL_ID}`, ch)
+    }
+
     const list = await listChannels()
-    setChannels(list.sort((a, b) => b.createdAt - a.createdAt))
+    setChannels(list.sort((a, b) => {
+      // 默认 Channel 始终置顶
+      if (a.channelId === LOCAL_SERVICES_CHANNEL_ID) return -1
+      if (b.channelId === LOCAL_SERVICES_CHANNEL_ID) return 1
+      return b.createdAt - a.createdAt
+    }))
   }, [])
 
   useEffect(() => {
@@ -173,32 +197,51 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
           </div>
         ) : (
           <div className="space-y-2">
-            {channels.map((ch) => (
-              <button
-                key={ch.channelId}
-                onClick={() => onEnterChannel(ch.channelId)}
-                className="w-full text-left p-4 bg-st-surface hover:bg-gray-800 border border-st-border rounded-xl transition-colors group"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="font-medium text-white group-hover:text-st-cyan transition-colors">
-                      {ch.name}
+            {channels.map((ch) => {
+              const isBuiltIn = ch.channelId === LOCAL_SERVICES_CHANNEL_ID
+              return (
+                <button
+                  key={ch.channelId}
+                  onClick={() => onEnterChannel(ch.channelId)}
+                  className={`w-full text-left p-4 border rounded-xl transition-colors group ${
+                    isBuiltIn
+                      ? 'bg-[#0e1a2e] hover:bg-[#112236] border-[#1e3a52] hover:border-st-cyan'
+                      : 'bg-st-surface hover:bg-gray-800 border-st-border'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className={`font-medium transition-colors ${isBuiltIn ? 'text-st-cyan' : 'text-white group-hover:text-st-cyan'}`}>
+                        {ch.name}
+                        {isBuiltIn && (
+                          <span className="ml-2 text-[10px] bg-st-cyan/10 text-st-cyan border border-st-cyan/30 rounded px-1.5 py-0.5">
+                            asC 内置
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1 font-mono">
+                        {ch.channelId}
+                      </div>
+                      {isBuiltIn && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          营销活动 · 优惠券 · asC 下单
+                        </div>
+                      )}
                     </div>
-                    <div className="text-xs text-gray-500 mt-1 font-mono">
-                      {ch.channelId}
+                    <div className="text-right">
+                      {isBuiltIn ? (
+                        <div className="text-xs text-st-cyan">persistent</div>
+                      ) : (
+                        <div className="text-xs text-gray-500">{ch.members.length} 成员</div>
+                      )}
+                      <div className="text-xs text-gray-600 mt-1">
+                        {new Date(ch.createdAt).toLocaleDateString()}
+                      </div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-xs text-gray-500">
-                      {ch.members.length} 成员
-                    </div>
-                    <div className="text-xs text-gray-600 mt-1">
-                      {new Date(ch.createdAt).toLocaleDateString()}
-                    </div>
-                  </div>
-                </div>
-              </button>
-            ))}
+                </button>
+              )
+            })}
           </div>
         )}
       </div>
