@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * Ed25519 鉴权测试
  * 运行方式：npx tsx src/agent/auth.test.ts

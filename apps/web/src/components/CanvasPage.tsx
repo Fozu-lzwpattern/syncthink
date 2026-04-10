@@ -13,7 +13,8 @@ import { createSyncAdapter, type SyncAdapter } from '../sync/adapter'
 import { joinChannel, getChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
-import { agentBridge, type AgentCommand } from '../agent/server'
+import { agentBridge, type AgentCommand, type ConversationAppendData } from '../agent/server'
+import type { ConversationMessage, ConversationShapeProps } from '../shapes/ConversationShape'
 import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServicesShape'
 import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
 import { ConversationShapeUtil } from '../shapes/ConversationShape'
@@ -192,7 +193,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     })
 
     // 监听 Agent 指令（来自 BroadcastChannel / localhost:9527）
-    const handleAgentCommand = (e: Event) => {
+    const handleAgentCommand = async (e: Event) => {
       const cmd = (e as CustomEvent<AgentCommand>).detail
       const ed = editorRef.current
       if (!ed) return
@@ -234,6 +235,49 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         ed.selectAll()
         ed.deleteShapes(ed.getSelectedShapeIds())
         agentBridge.emit({ type: 'canvas:cleared', timestamp: Date.now() })
+      } else if (cmd.action === 'conversation:append' && cmd.conversationAppend) {
+        const data = cmd.conversationAppend as ConversationAppendData
+        const shapeId = data.conversationId as ReturnType<typeof createShapeId>
+        const existing = ed.getShape(shapeId)
+        if (existing && existing.type === 'syncthink-conversation') {
+          const props = existing.props as ConversationShapeProps
+          const newMsg: ConversationMessage = {
+            messageId: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            senderNodeId: data.conversationId, // reuse as sender ref
+            senderName: data.senderName,
+            content: data.content,
+            isAgentMessage: data.isAgentMessage ?? true,
+            timestamp: Date.now(),
+          }
+          const updatedMessages = [...props.messages, newMsg]
+          // auto-expand height based on message count (approx 56px per msg)
+          const newH = Math.max(props.h, 120 + updatedMessages.length * 56)
+          ed.updateShape({
+            id: shapeId,
+            type: 'syncthink-conversation',
+            props: {
+              ...props,
+              messages: updatedMessages,
+              h: newH,
+              isCollapsed: false,
+            },
+          })
+          agentBridge.emit({
+            type: 'conversation:message_appended',
+            conversationId: data.conversationId,
+            messageId: newMsg.messageId,
+            timestamp: Date.now(),
+          })
+          // record to Interaction Log
+          await recordInteraction({
+            channelId,
+            actorNodeId: identity.nodeId,
+            type: 'agent_message',
+            payload: { conversationId: data.conversationId, senderName: data.senderName },
+          })
+        } else {
+          console.warn(`[CanvasPage] conversation:append — shape not found or wrong type: ${data.conversationId}`)
+        }
       }
     }
 

@@ -44,7 +44,7 @@ function fromHex(h: string): Uint8Array {
 
 /** 未签名的指令载荷 */
 export interface AgentCommandPayload {
-  action: 'create' | 'update' | 'delete' | 'clear'
+  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append'
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data?: any
 }

@@ -145,6 +145,28 @@ export class AgentClient {
     await this.send({ action: 'clear' })
   }
 
+  /**
+   * 便捷方法：向 ConversationNode 追加一条消息
+   * @param conversationId  目标 ConversationNode 的 shape ID（tldraw shape:xxx 格式）
+   * @param content         消息内容
+   * @param senderName      发送方名称（可选，默认用 nodeId 前缀）
+   */
+  async appendToConversation(
+    conversationId: string,
+    content: string,
+    senderName?: string
+  ): Promise<void> {
+    await this.send({
+      action: 'conversation:append',
+      data: {
+        conversationId,
+        senderName: senderName ?? `Agent[${this.nodeId.slice(0, 6)}]`,
+        content,
+        isAgentMessage: true,
+      },
+    })
+  }
+
   destroy() {
     this.channel.close()
   }

@@ -4,6 +4,7 @@
  * 展示两节点之间的对话记录（含 Agent 消息）。
  * 注册为 'syncthink-conversation' shape type
  */
+import React from 'react'
 import {
   BaseBoxShapeUtil,
   HTMLContainer,
@@ -70,7 +71,27 @@ function statusLabel(status: ConversationShapeProps['status']): {
 
 // ---- 渲染组件 ----
 
-function MessageItem({ msg }: { msg: ConversationMessage }) {
+const FADE_IN_STYLE: React.CSSProperties = {
+  animation: 'st-fade-in 0.3s ease-out',
+}
+
+// Inject keyframes once
+if (typeof document !== 'undefined') {
+  const styleId = 'st-conversation-anim'
+  if (!document.getElementById(styleId)) {
+    const s = document.createElement('style')
+    s.id = styleId
+    s.textContent = `
+      @keyframes st-fade-in {
+        from { opacity: 0; transform: translateY(4px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+    `
+    document.head.appendChild(s)
+  }
+}
+
+function MessageItem({ msg, isLatest }: { msg: ConversationMessage; isLatest?: boolean }) {
   const senderColor = deriveAvatarColor(msg.senderNodeId)
   return (
     <div
@@ -78,6 +99,7 @@ function MessageItem({ msg }: { msg: ConversationMessage }) {
         marginBottom: 8,
         paddingBottom: 8,
         borderBottom: '1px solid #ffffff0d',
+        ...(isLatest ? FADE_IN_STYLE : {}),
       }}
     >
       <div
@@ -256,8 +278,12 @@ function ConversationCard({ shape }: { shape: ConversationNodeShape }) {
               暂无消息
             </div>
           ) : (
-            p.messages.map((msg) => (
-              <MessageItem key={msg.messageId} msg={msg} />
+            p.messages.map((msg, idx) => (
+              <MessageItem
+                key={msg.messageId}
+                msg={msg}
+                isLatest={idx === p.messages.length - 1}
+              />
             ))
           )}
         </div>

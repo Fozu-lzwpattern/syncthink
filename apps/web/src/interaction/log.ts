@@ -17,6 +17,7 @@ export type InteractionType =
   | 'agent_write'
   | 'agent_confirm'
   | 'agent_reject'
+  | 'agent_message'
 
 export interface InteractionRecord {
   id: string               // nanoid

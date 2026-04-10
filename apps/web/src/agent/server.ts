@@ -28,20 +28,31 @@ export interface AgentShape {
   end?: { x: number; y: number }
 }
 
+export interface ConversationAppendData {
+  conversationId: string  // ConversationNode shape ID
+  senderName: string
+  content: string
+  isAgentMessage?: boolean
+}
+
 export interface AgentCommand {
-  action: 'create' | 'update' | 'delete' | 'clear'
+  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append'
   shape?: AgentShape
   id?: string
+  conversationAppend?: ConversationAppendData
 }
 
 export interface AgentEvent {
-  type: 'shape:added' | 'shape:updated' | 'shape:removed' | 'canvas:cleared' | 'auth:rejected'
+  type: 'shape:added' | 'shape:updated' | 'shape:removed' | 'canvas:cleared' | 'auth:rejected' | 'conversation:message_appended'
   shapeId?: string
   shape?: AgentShape
   timestamp: number
   /** auth:rejected 时携带 */
   reason?: string
   nodeId?: string
+  /** conversation:message_appended 时携带 */
+  conversationId?: string
+  messageId?: string
 }
 
 /**
