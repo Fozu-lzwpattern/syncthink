@@ -50,13 +50,15 @@ export interface AgentCommandBody {
   command: {
     action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append'
     shape?: {
-      type: 'text' | 'arrow' | 'sticky' | 'geo'
+      type: 'text' | 'arrow' | 'sticky' | 'geo' | 'syncthink-card'
       x: number
       y: number
       w?: number
       h?: number
       text?: string
       color?: string
+      /** syncthink-card 专用 props（cardType/title/body/tags/status/authorName/votes） */
+      props?: Record<string, unknown>
     }
     id?: string
     conversationAppend?: {

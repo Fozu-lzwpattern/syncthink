@@ -16,7 +16,7 @@
 import { verifyCommand, type SignedAgentCommand } from './auth'
 
 export interface AgentShape {
-  type: 'text' | 'arrow' | 'sticky' | 'geo'
+  type: 'text' | 'arrow' | 'sticky' | 'geo' | 'syncthink-card'
   x: number
   y: number
   w?: number
@@ -26,6 +26,8 @@ export interface AgentShape {
   /** arrow only */
   start?: { x: number; y: number }
   end?: { x: number; y: number }
+  /** syncthink-card only */
+  props?: Record<string, unknown>
 }
 
 export interface ConversationAppendData {

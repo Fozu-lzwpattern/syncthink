@@ -247,6 +247,26 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
               ...(s.color ? { color: s.color } : {}),
             },
           })
+        } else if (s.type === 'syncthink-card') {
+          // Agent 创建 SyncThinkCard（五种类型：idea/decision/issue/action/reference）
+          const cardProps = (s.props ?? {}) as Record<string, unknown>
+          ed.createShape({
+            id,
+            type: 'syncthink-card',
+            x: s.x,
+            y: s.y,
+            props: {
+              cardType: cardProps.cardType ?? 'idea',
+              title: cardProps.title ?? s.text ?? '',
+              body: cardProps.body ?? '',
+              tags: cardProps.tags ?? [],
+              status: cardProps.status ?? 'open',
+              authorName: cardProps.authorName ?? 'Agent',
+              votes: cardProps.votes ?? 0,
+              w: s.w ?? 280,
+              h: s.h ?? 160,
+            },
+          })
         }
         agentBridge.emit({ type: 'shape:added', shapeId: id, timestamp: Date.now() })
       } else if (cmd.action === 'delete' && cmd.id) {
