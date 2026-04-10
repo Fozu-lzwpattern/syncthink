@@ -862,17 +862,115 @@ Agent 能力：
 - persistent Channel 实现（Channel.type = 'persistent'，结构已在 Phase 1 预留）
 - 跨 Channel Agent 委托（不需要改身份层/鉴权层）
 - 异步消息队列（人离线时 Agent 代理接收）
+- **⭐ 本地生活服务 Channel（asC × 美团，首个 Agentic Commerce 落地场景）**
 
 ### Stage 3 — 话题社区
 
-- Schema 语义标签 + DHT 节点发现
+- Schema 语义标签 + Gossip 嵌入式目录传播（无中心查询点，见 12.4）
 - 话题 Channel + 社区治理（CRDT 多签）
 
 ### Stage 4 — A2A 信誉与交易网络
 
 - 基于 InteractionRecord 聚合信誉分（Phase 1 数据直接可用）
-- asC ↔ asB P2P 协商协议
+- asC ↔ asB P2P 协商协议（参考 duality-demo scene4 合约经济）
 - 信誉 P2P 交换与背书
+
+---
+
+## 12.6 ⭐ 本地生活服务 Channel — 首个 Agentic Commerce 落地场景
+
+**设计时间**：2026-04-10
+
+**定位**：SyncThink 默认内置一个特殊 Channel，连接本地生活服务（美团等平台）。这是 asC（作为消费者的 Agent）在真实商业场景中的第一次落地——用户的 Agent 代理其在协作画布上完成消费决策和交易执行。
+
+```
+传统模式：
+用户 → 打开App → 浏览活动 → 手动下单
+
+SyncThink 本地生活服务 Channel：
+用户的 asC → 接入本地生活 Channel
+             → 自动感知营销活动 / 优惠信息
+             → 在画布上呈现为结构化卡片
+             → 用户确认 / asC 直接下单
+             → Interaction Log 记录（信誉原材料）
+```
+
+### Channel 设计
+
+```typescript
+interface LocalServicesChannel extends Channel {
+  type: 'persistent'
+  sceneId: 'local-services-v1'       // 专属 Scene Schema
+  metadata: {
+    serviceType: 'food-delivery'     // 外卖
+               | 'dine-in'          // 到餐
+               | 'hotel'            // 酒店
+               | 'activity'         // 娱乐/活动
+               | 'all'              // 聚合
+    region: string                   // 城市/区域
+    agentMode: 'on-demand'           // Phase 1：用户主动触发
+             | 'proactive'          // Phase 2：Agent 主动推送优惠
+  }
+}
+```
+
+### Scene Schema：local-services-v1
+
+卡片类型：
+
+| 卡片类型 | 说明 | 字段 |
+|---------|------|------|
+| `promotion` | 营销活动卡片 | title / discount / validUntil / merchantName / category |
+| `coupon` | 优惠券 | value / minSpend / expiresAt / claimUrl / claimed |
+| `order-intent` | 下单意向 | items / estimatedPrice / deliveryAddress / status |
+| `order-confirmed` | 已确认订单 | orderId / actualPrice / eta / trackingUrl |
+| `recommendation` | Agent 推荐 | reason / confidence / promotionRef |
+
+### asC 行为协议
+
+```typescript
+// asC 在本地生活 Channel 中的能力范围
+const localServicesCapabilities: AgentCapabilities = {
+  read: true,
+  write: true,
+  canWriteCardTypes: [
+    'promotion',        // asB（商家侧 Agent）写入
+    'coupon',           // asB 写入
+    'recommendation',   // asC 自主写入（向用户推荐）
+    'order-intent',     // asC 写入，需用户确认
+  ],
+  requiresConfirmation: true,   // order-intent → order-confirmed 需人工确认
+  maxCardsPerMinute: 5,
+}
+
+// A2A 交互流程（Stage 2 实现，Stage 4 加信誉）
+// asB（美团平台 Agent）→ 写入 promotion/coupon 卡片到 Channel
+// asC（用户 Agent）    → 感知卡片，评估 LTV/偏好，写入 recommendation
+// 用户确认            → asC 发起 order-intent
+// asB 响应            → 实时制券/定价协商（参考 KangaBase ARSP 协议）
+// 双方 STRIKE         → asC 执行下单，写入 order-confirmed
+// Interaction Log 记录完整交互链（信誉原材料）
+```
+
+### Phase 1 实现范围（最小可用）
+
+- [ ] `local-services-v1` Scene Schema 定义
+- [ ] promotion / coupon 卡片 UI（只读展示）
+- [ ] 手动触发"获取优惠"→ Mock 数据填入画布（Phase 1 用 Mock，Stage 2 接真实 API）
+- [ ] order-intent 卡片 + 确认按钮（点击跳转到平台 App）
+
+### Stage 2 扩展
+
+- 接入真实本地生活 API（美团外卖/到餐 OpenAPI 或 asB Agent 接口）
+- asC 主动模式：基于用户历史偏好，定时推送优惠卡片
+- asC ↔ asB 实时价格协商（KangaBase 合约协议）
+
+### 为什么是默认内置 Channel？
+
+1. **降低冷启动门槛**：新用户打开 SyncThink，立刻有一个可用的 Channel，不需要先理解 P2P 协议
+2. **asC 概念教育**：用户第一次见到"Agent 帮我发现优惠/下单"，直观感受 Agentic Commerce 不是抽象概念
+3. **Interaction Log 冷启动**：最早的交互数据从本地生活消费行为开始积累，Stage 4 信誉系统有真实数据可用
+4. **商业闭环**：SyncThink 本身的商业价值不只是协作工具，而是 asC 接入真实商业场景的入口
 
 ---
 
@@ -1033,7 +1131,55 @@ interface AgentChannel extends Channel {
 
 **问题**：P2P 网络如何发现陌生节点？（不依赖中心化目录）
 
-**方案：Schema 语义 + 分布式哈希表（DHT）**
+**核心设计原则（2026-04-10 确认）**：
+> "每个个体都带有并传递自身已知和持续收录未知 Channel 的目录服务——这是嵌入式的。"
+
+**没有中心化查询点，没有云端目录服务。** AI Base 或任何中心化存储在 SyncThink 的体系里没有位置——即使是 Stage 3 的 Channel 发现功能，也完全通过以下两层嵌入式机制实现。
+
+---
+
+#### 层一：Gossip Protocol — 自传播目录
+
+每个节点本地维护一张 `channel_directory` 表（IndexedDB / SQLite）。
+
+```
+P2P 握手时自动交换目录（增量 gossip）：
+
+节点A 已知：[ch1, ch2, ch3]
+节点B 已知：[ch2, ch4, ch5]
+
+A ↔ B 握手时：
+  → A 把 ch1/ch3 的元数据推给 B
+  → B 把 ch4/ch5 的元数据推给 A
+  → 双方目录各自扩充
+
+新节点C 加入：
+  → 只需连上任意一个已知节点
+  → 通过多跳 gossip 逐渐"感染"整个网络的目录
+  → 无需询问任何中心服务器
+```
+
+**目录条目结构**：
+```typescript
+interface ChannelDirectoryEntry {
+  channelId: string
+  name: string
+  sceneId: string
+  tags: string[]           // 语义标签（用于过滤）
+  ownerNodeId: string
+  memberCount: number      // 近似值，gossip 携带
+  lastActiveAt: number     // 活跃时间戳
+  ttl: number              // 存活时间（长期无活跃自动老化消失）
+  inviteRequired: boolean
+  // 热门 Channel 被更多节点持有 = 自然被发现
+}
+```
+
+**老化机制**：`lastActiveAt` 超过 TTL（默认 30 天）的条目自动从本地目录删除，且不再 gossip 传播。热门 Channel 持续活跃，自然在更多节点上存活。
+
+---
+
+#### 层二：Schema 语义标签 + 本地过滤
 
 ```
 每个节点广播自己感兴趣的 Schema 标签：
@@ -1041,15 +1187,16 @@ interface AgentChannel extends Channel {
   Node B: ["neuromodulation", "AI-drug-design"]
   Node C: ["OKR", "team-collaboration"]
 
-DHT 存储：tag → [nodeId, nodeId, ...]
-  "neuromodulation" → [nodeA, nodeB, ...]
-
-发现流程：
-  我的 Agent 查询 DHT("neuromodulation")
-  → 找到 Node B
+本地目录过滤（不需要全网广播查询）：
+  我查询本地 channel_directory WHERE tags CONTAINS "neuromodulation"
+  → 找到已 gossip 到本地的 Channel 列表
   → 发起连接请求（含邀请码/验证）
   → 建立话题信道
-  → 共享该话题下的画布/笔记/情报
+
+如果本地没有匹配条目：
+  → Agent 主动向已连接的 Peer 广播兴趣标签
+  → Peer 从自己目录里推送匹配条目
+  → 逐跳扩散查询（最多 3 跳，防止广播风暴）
 ```
 
 **社区治理**：话题信道的 Schema 就是治理协议

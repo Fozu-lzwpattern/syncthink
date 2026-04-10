@@ -1,0 +1,11 @@
+{
+  "name": "syncthink",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm -F web dev",
+    "dev:signaling": "pnpm -F signaling dev",
+    "build": "pnpm -F web build",
+    "typecheck": "pnpm -F web typecheck",
+    "lint": "pnpm -F web lint"
+  }
+}
