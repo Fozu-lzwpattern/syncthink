@@ -8,9 +8,12 @@
  * - GET /shapes         读取当前画布所有 shape
  * - WS /events          实时推送画布变更事件
  *
- * Auth（Phase 1）：Bearer token = NodeIdentity.publicKey（hex）
- * Stage 2 升级为 Ed25519 消息签名验证
+ * Auth：Ed25519 消息签名验证（见 auth.ts）
+ * - 每条指令携带 payload + nodeId + publicKey + timestamp + signature
+ * - AgentBridge 验签，过期（±30s）或签名无效的指令被拒绝
  */
+
+import { verifyCommand, type SignedAgentCommand } from './auth'
 
 export interface AgentShape {
   type: 'text' | 'arrow' | 'sticky' | 'geo'
@@ -32,32 +35,43 @@ export interface AgentCommand {
 }
 
 export interface AgentEvent {
-  type: 'shape:added' | 'shape:updated' | 'shape:removed' | 'canvas:cleared'
+  type: 'shape:added' | 'shape:updated' | 'shape:removed' | 'canvas:cleared' | 'auth:rejected'
   shapeId?: string
   shape?: AgentShape
   timestamp: number
+  /** auth:rejected 时携带 */
+  reason?: string
+  nodeId?: string
 }
 
 /**
  * AgentBridge: 前端侧的桥接层
- * 注入 tldraw editor 引用后，接收来自 localhost:9527 的指令并执行
  *
- * 由于浏览器无法直接监听 TCP/WS 服务端，Phase 1 通过
- * SharedWorker + BroadcastChannel 实现跨 tab 的 Agent 指令转发。
- * 实际 HTTP/WS 服务由配套的 Electron 主进程 or Vite 插件代理处理。
+ * 接收来自 BroadcastChannel 的 SignedAgentCommand，
+ * 验证 Ed25519 签名后执行 tldraw editor 操作。
  *
- * Phase 1 简化方案：Agent 通过 postMessage 写入 BroadcastChannel，
- * 页面监听后执行 tldraw editor 操作。
+ * Phase 1 通过 BroadcastChannel 实现跨 tab 的指令转发。
+ * 签名验证保证指令来源可信，防止 XSS 或恶意 tab 注入。
  */
 export class AgentBridge {
   private channel: BroadcastChannel
   private listeners: Array<(event: AgentEvent) => void> = []
+  /** 已通过验证的 nodeId 集合（可选：白名单模式） */
+  private trustedNodes: Set<string> | null = null
+  /** 是否打印鉴权日志 */
+  private verbose: boolean
 
-  constructor(channelName = 'syncthink-agent') {
+  constructor(channelName = 'syncthink-agent', options: {
+    trustedNodes?: string[]
+    verbose?: boolean
+  } = {}) {
     this.channel = new BroadcastChannel(channelName)
-    this.channel.addEventListener('message', (e) => {
-      const cmd = e.data as AgentCommand
-      this._dispatch(cmd)
+    this.trustedNodes = options.trustedNodes ? new Set(options.trustedNodes) : null
+    this.verbose = options.verbose ?? true
+
+    this.channel.addEventListener('message', async (e) => {
+      const cmd = e.data as SignedAgentCommand
+      await this._verifyAndDispatch(cmd)
     })
   }
 
@@ -74,9 +88,68 @@ export class AgentBridge {
     this.listeners.forEach((fn) => fn(event))
   }
 
-  private _dispatch(cmd: AgentCommand) {
-    // 触发内部事件，CanvasPage 监听后执行 tldraw 操作
-    window.dispatchEvent(new CustomEvent('agent:command', { detail: cmd }))
+  /**
+   * 动态添加信任节点（运行时授权）
+   * 调用后，该 nodeId 的签名指令将被接受
+   */
+  trustNode(nodeId: string) {
+    if (!this.trustedNodes) this.trustedNodes = new Set()
+    this.trustedNodes.add(nodeId)
+    if (this.verbose) {
+      console.log(`[AgentBridge] trusted node added: ${nodeId.slice(0, 12)}…`)
+    }
+  }
+
+  /**
+   * 撤销节点信任
+   */
+  revokeNode(nodeId: string) {
+    this.trustedNodes?.delete(nodeId)
+    if (this.verbose) {
+      console.log(`[AgentBridge] node revoked: ${nodeId.slice(0, 12)}…`)
+    }
+  }
+
+  private async _verifyAndDispatch(cmd: SignedAgentCommand) {
+    // 1. Ed25519 签名验证
+    const result = await verifyCommand(cmd)
+    if (!result.ok) {
+      if (this.verbose) {
+        console.warn(`[AgentBridge] auth rejected — reason: ${result.reason}, nodeId: ${cmd.nodeId?.slice(0, 12)}…`)
+      }
+      this.emit({
+        type: 'auth:rejected',
+        timestamp: Date.now(),
+        reason: result.reason,
+        nodeId: cmd.nodeId,
+      })
+      return
+    }
+
+    // 2. 可选白名单检查
+    if (this.trustedNodes !== null && !this.trustedNodes.has(cmd.nodeId)) {
+      if (this.verbose) {
+        console.warn(`[AgentBridge] node not in trusted list: ${cmd.nodeId.slice(0, 12)}…`)
+      }
+      this.emit({
+        type: 'auth:rejected',
+        timestamp: Date.now(),
+        reason: 'not_trusted',
+        nodeId: cmd.nodeId,
+      })
+      return
+    }
+
+    if (this.verbose) {
+      console.log(`[AgentBridge] ✅ command verified — action: ${cmd.payload.action}, nodeId: ${cmd.nodeId.slice(0, 12)}…`)
+    }
+
+    // 3. 派发给 CanvasPage 执行
+    const agentCmd: AgentCommand = {
+      action: cmd.payload.action,
+      ...cmd.payload.data,
+    }
+    window.dispatchEvent(new CustomEvent('agent:command', { detail: agentCmd }))
   }
 
   destroy() {
@@ -86,3 +159,17 @@ export class AgentBridge {
 
 /** 单例 AgentBridge，全局共用 */
 export const agentBridge = new AgentBridge()
+
+// ---------- Agent 客户端辅助（浏览器/Node 均可用）----------
+
+/**
+ * AgentClient：Agent 侧发指令的封装
+ * 自动管理私钥生成/持久化，每次发指令自动签名
+ *
+ * 使用示例（从 Agent 脚本或测试页面调用）：
+ * ```ts
+ * const client = await AgentClient.create('syncthink-agent')
+ * await client.send({ action: 'create', data: { shape: { type: 'text', x: 100, y: 100, text: 'hello' } } })
+ * ```
+ */
+export { AgentClient } from './client'
