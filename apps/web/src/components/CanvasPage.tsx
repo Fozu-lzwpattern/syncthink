@@ -3,6 +3,7 @@
  * - 初始化 Sync Adapter（tldraw store ↔ Yjs）
  * - 渲染 tldraw 画布
  * - 顶部状态栏：Channel ID、在线人数、返回按钮
+ * - Phase 2：ConversationNode / AgentNode 创建按钮 + Review 模式
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Tldraw, type Editor, createShapeId } from '@tldraw/tldraw'
@@ -11,12 +12,19 @@ import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter } from '../sync/adapter'
 import { joinChannel, getChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
-import { recordInteraction } from '../interaction/log'
+import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
 import { agentBridge, type AgentCommand } from '../agent/server'
 import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServicesShape'
 import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
+import { ConversationShapeUtil } from '../shapes/ConversationShape'
+import { AgentShapeUtil } from '../shapes/AgentShape'
+import { deriveAvatarColor } from '../identity/nodeIdentity'
 
-const CUSTOM_SHAPE_UTILS = [LocalServicesCardShapeUtil]
+const CUSTOM_SHAPE_UTILS = [
+  LocalServicesCardShapeUtil,
+  ConversationShapeUtil,
+  AgentShapeUtil,
+]
 
 interface Props {
   channelId: string
@@ -24,12 +32,99 @@ interface Props {
   onBack: () => void
 }
 
+// ---- 相对时间 ----
+function relTime(ts: number): string {
+  const diff = Date.now() - ts
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h前`
+  return `${Math.floor(diff / 86_400_000)}d前`
+}
+
+// ---- Review 时间轴组件 ----
+interface ReviewTimelineProps {
+  interactions: InteractionRecord[]
+}
+
+function ReviewTimeline({ interactions }: ReviewTimelineProps) {
+  const sorted = [...interactions].sort((a, b) => a.timestamp - b.timestamp)
+  const earliest = sorted[0]?.timestamp ?? Date.now()
+  const latest = sorted[sorted.length - 1]?.timestamp ?? Date.now()
+  const [sliderValue, setSliderValue] = useState(latest)
+
+  const filteredEvents = sorted
+    .filter((r) => r.timestamp <= sliderValue)
+    .slice(-5)
+    .reverse()
+
+  const formatTs = (ts: number) =>
+    new Date(ts).toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+
+  return (
+    <div
+      className="shrink-0 border-t border-st-border bg-st-surface px-4 py-2"
+      style={{ zIndex: 10 }}
+    >
+      {/* 时间轴滑块 */}
+      <div className="flex items-center gap-3 mb-2">
+        <span className="text-xs text-gray-500 whitespace-nowrap font-mono">
+          {formatTs(earliest)}
+        </span>
+        <input
+          type="range"
+          className="flex-1 accent-cyan-400"
+          min={earliest}
+          max={latest === earliest ? earliest + 1 : latest}
+          value={sliderValue}
+          step={1}
+          onChange={(e) => setSliderValue(Number(e.target.value))}
+        />
+        <span className="text-xs text-gray-500 whitespace-nowrap font-mono">
+          {formatTs(latest)}
+        </span>
+        <span className="text-xs text-st-cyan font-mono whitespace-nowrap">
+          @ {formatTs(sliderValue)}
+        </span>
+      </div>
+
+      {/* 事件列表 */}
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {filteredEvents.length === 0 ? (
+          <span className="text-xs text-gray-600">此时间点前暂无事件</span>
+        ) : (
+          filteredEvents.map((r) => (
+            <div
+              key={r.id}
+              className="shrink-0 flex items-center gap-1.5 bg-st-bg border border-st-border rounded px-2 py-1"
+            >
+              <span className="text-xs font-mono text-gray-400">
+                {r.actorNodeId.slice(0, 6)}
+              </span>
+              <span className="text-xs text-st-cyan">{r.type}</span>
+              <span className="text-xs text-gray-600">{relTime(r.timestamp)}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---- 主组件 ----
+
 export function CanvasPage({ channelId, identity, onBack }: Props) {
   const adapterRef = useRef<SyncAdapter | null>(null)
   const editorRef = useRef<Editor | null>(null)
   const [adapter, setAdapter] = useState<SyncAdapter | null>(null)
   const [peers, setPeers] = useState(0)
   const [syncReady, setSyncReady] = useState(false)
+
+  // Review 模式
+  const [isReview, setIsReview] = useState(false)
+  const [interactions, setInteractions] = useState<InteractionRecord[]>([])
 
   useEffect(() => {
     let destroyed = false
@@ -75,6 +170,16 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
       adapterRef.current = null
     }
   }, [channelId, identity])
+
+  // Review 模式切换：加载 Interaction Log
+  const handleToggleReview = useCallback(async () => {
+    const next = !isReview
+    setIsReview(next)
+    if (next) {
+      const data = await getInteractions(channelId)
+      setInteractions(data)
+    }
+  }, [isReview, channelId])
 
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
@@ -136,6 +241,60 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     return () => window.removeEventListener('agent:command', handleAgentCommand)
   }, [])
 
+  // ---- 创建 ConversationNode ----
+  const handleCreateConversation = useCallback(() => {
+    const ed = editorRef.current
+    if (!ed) return
+    const { x, y } = ed.getViewportPageBounds().center
+    const id = createShapeId()
+    ed.createShape({
+      id,
+      type: 'syncthink-conversation',
+      x: x - 160,
+      y: y - 100,
+      props: {
+        w: 320,
+        h: 200,
+        initiatorNodeId: identity.nodeId,
+        responderNodeId: '',
+        displayName: `对话 #${Date.now().toString().slice(-4)}`,
+        messages: [],
+        isCollapsed: false,
+        status: 'active',
+        authorNodeId: identity.nodeId,
+        startedAt: Date.now(),
+        outputCardIds: [],
+      },
+    })
+  }, [identity])
+
+  // ---- 创建 AgentNode ----
+  const handleCreateAgent = useCallback(() => {
+    const ed = editorRef.current
+    if (!ed) return
+    const { x, y } = ed.getViewportPageBounds().center
+    const id = createShapeId()
+    ed.createShape({
+      id,
+      type: 'syncthink-agent',
+      x: x - 80,
+      y: y - 60,
+      props: {
+        w: 160,
+        h: 120,
+        agentNodeId: `agent-${identity.nodeId.slice(0, 8)}`,
+        displayName: `${identity.displayName}的 Agent 🤖`,
+        ownerNodeId: identity.nodeId,
+        color: deriveAvatarColor(identity.nodeId),
+        status: 'idle',
+        currentTask: '',
+        lastActionAt: Date.now(),
+        isMinimized: false,
+        stats: { cardCreated: 0, suggestionAccepted: 0, suggestionRejected: 0 },
+      },
+    })
+  }, [identity])
+
   return (
     <div className="flex flex-col h-screen bg-st-bg">
       {/* 顶部状态栏 */}
@@ -154,6 +313,32 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         </div>
 
         <div className="flex items-center gap-4">
+          {/* Phase 2：创建按钮 */}
+          <button
+            onClick={handleCreateConversation}
+            className="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+          >
+            + 对话节点
+          </button>
+          <button
+            onClick={handleCreateAgent}
+            className="text-xs px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white transition-colors"
+          >
+            + Agent节点
+          </button>
+
+          {/* Live / Review 切换 */}
+          <button
+            onClick={handleToggleReview}
+            className={`text-xs px-2.5 py-1 rounded border transition-colors ${
+              isReview
+                ? 'bg-amber-500 border-amber-400 text-black font-bold'
+                : 'border-st-border text-gray-400 hover:text-white'
+            }`}
+          >
+            {isReview ? '📼 Review' : '🔴 Live'}
+          </button>
+
           {/* 同步状态 */}
           <div className="flex items-center gap-1.5">
             <div
@@ -202,6 +387,9 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           />
         )}
       </div>
+
+      {/* Review 时间轴 */}
+      {isReview && <ReviewTimeline interactions={interactions} />}
     </div>
   )
 }

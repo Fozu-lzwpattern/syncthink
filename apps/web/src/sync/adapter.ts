@@ -38,7 +38,7 @@ export interface SyncAdapterOptions {
 export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
   const {
     channelId,
-    signalingUrls = ['wss://signaling.yjs.dev'],
+    signalingUrls = ['ws://localhost:4444', 'wss://signaling.yjs.dev'],
     enableWebrtc = true,
   } = options
 
