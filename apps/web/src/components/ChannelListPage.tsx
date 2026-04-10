@@ -24,6 +24,8 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [newName, setNewName] = useState('')
   const [joinId, setJoinId] = useState('')
   const [loading, setLoading] = useState(false)
+  const [newChannelId, setNewChannelId] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const loadChannels = useCallback(async () => {
     // 确保本地生活服务默认 Channel 存在
@@ -69,10 +71,24 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
       })
       setShowCreate(false)
       setNewName('')
-      onEnterChannel(ch.channelId)
+      // 先显示邀请弹窗，不直接跳转
+      setNewChannelId(ch.channelId)
+      await loadChannels()
     } finally {
       setLoading(false)
     }
+  }
+
+  const inviteUrl = newChannelId
+    ? `${window.location.origin}${window.location.pathname}?channel=${newChannelId}&invite=1`
+    : ''
+
+  const handleCopyInvite = () => {
+    if (!inviteUrl) return
+    navigator.clipboard.writeText(inviteUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
   }
 
   const handleJoin = async () => {
@@ -95,6 +111,52 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
 
   return (
     <div className="min-h-screen bg-st-bg text-white">
+      {/* 新建 Channel 邀请弹窗 */}
+      {newChannelId && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setNewChannelId(null)}
+        >
+          <div
+            className="bg-st-surface border border-st-border rounded-xl p-6 w-[420px] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold text-white mb-1">Channel 已创建 ✓</div>
+            <div className="text-xs text-gray-400 mb-4">分享邀请链接，或直接进入开始协作：</div>
+            <div className="flex gap-2 mb-4">
+              <input
+                readOnly
+                value={inviteUrl}
+                className="flex-1 px-3 py-2 bg-st-bg border border-st-border rounded-lg text-xs font-mono text-gray-300 outline-none"
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                onClick={handleCopyInvite}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  copied ? 'bg-green-600 text-white' : 'bg-st-indigo hover:bg-indigo-500 text-white'
+                }`}
+              >
+                {copied ? '✓ 已复制' : '复制链接'}
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setNewChannelId(null); onEnterChannel(newChannelId) }}
+                className="flex-1 py-2 bg-st-cyan text-black font-medium text-sm rounded-lg hover:opacity-90"
+              >
+                进入画布 →
+              </button>
+              <button
+                onClick={() => setNewChannelId(null)}
+                className="px-4 py-2 text-gray-400 hover:text-white text-sm"
+              >
+                稍后
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="border-b border-st-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">

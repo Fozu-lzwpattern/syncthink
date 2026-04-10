@@ -19,12 +19,14 @@ import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServic
 import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
 import { ConversationShapeUtil } from '../shapes/ConversationShape'
 import { AgentShapeUtil } from '../shapes/AgentShape'
+import { SyncThinkCardShapeUtil, type CardType } from '../shapes/SyncThinkCardShape'
 import { deriveAvatarColor } from '../identity/nodeIdentity'
 
 const CUSTOM_SHAPE_UTILS = [
   LocalServicesCardShapeUtil,
   ConversationShapeUtil,
   AgentShapeUtil,
+  SyncThinkCardShapeUtil,
 ]
 
 interface Props {
@@ -126,6 +128,13 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   // Review 模式
   const [isReview, setIsReview] = useState(false)
   const [interactions, setInteractions] = useState<InteractionRecord[]>([])
+
+  // 邀请弹窗
+  const [showInvite, setShowInvite] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  // 卡片类型菜单
+  const [showCardMenu, setShowCardMenu] = useState(false)
 
   useEffect(() => {
     let destroyed = false
@@ -339,6 +348,52 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     })
   }, [identity])
 
+  // ---- 创建 SyncThinkCard ----
+  const handleCreateCard = useCallback((cardType: CardType) => {
+    const ed = editorRef.current
+    if (!ed) return
+    const { x, y } = ed.getViewportPageBounds().center
+    const id = createShapeId()
+    const offset = (Math.random() - 0.5) * 60
+    ed.createShape({
+      id,
+      type: 'syncthink-card',
+      x: x - 140 + offset,
+      y: y - 70 + offset,
+      props: {
+        w: 280,
+        h: 140,
+        cardType,
+        title: `新${cardType === 'idea' ? '想法' : cardType === 'decision' ? '决策' : cardType === 'issue' ? '问题' : cardType === 'action' ? '行动' : '引用'}`,
+        body: '',
+        authorNodeId: identity.nodeId,
+        authorName: identity.displayName,
+        createdAt: Date.now(),
+        status: 'open',
+        tags: [],
+        votes: 0,
+        isExpanded: true,
+      },
+    })
+    setShowCardMenu(false)
+    recordInteraction({
+      channelId,
+      actorNodeId: identity.nodeId,
+      type: 'card_created',
+      payload: { cardType },
+    })
+  }, [identity, channelId])
+
+  // ---- 邀请链接 ----
+  const inviteUrl = `${window.location.origin}${window.location.pathname}?channel=${channelId}&invite=1`
+
+  const handleCopyInvite = useCallback(() => {
+    navigator.clipboard.writeText(inviteUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }, [inviteUrl])
+
   return (
     <div className="flex flex-col h-screen bg-st-bg">
       {/* 顶部状态栏 */}
@@ -354,16 +409,53 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           <span className="text-st-cyan font-mono text-sm">
             ⟁ {channelId}
           </span>
+          {/* 邀请按钮 */}
+          <button
+            onClick={() => setShowInvite(true)}
+            className="text-xs px-2 py-0.5 rounded border border-st-border text-gray-400 hover:text-white hover:border-gray-500 transition-colors"
+          >
+            🔗 邀请
+          </button>
         </div>
 
-        <div className="flex items-center gap-4">
-          {/* Phase 2：创建按钮 */}
+        <div className="flex items-center gap-3">
+          {/* SyncThinkCard 创建（下拉菜单） */}
+          <div className="relative">
+            <button
+              onClick={() => setShowCardMenu((v) => !v)}
+              className="text-xs px-2.5 py-1 rounded bg-purple-700 hover:bg-purple-600 text-white transition-colors"
+            >
+              + 卡片 ▾
+            </button>
+            {showCardMenu && (
+              <div className="absolute top-full left-0 mt-1 bg-st-surface border border-st-border rounded-lg shadow-xl z-50 min-w-[120px] overflow-hidden">
+                {([
+                  ['idea',      '💡 想法'],
+                  ['decision',  '✅ 决策'],
+                  ['issue',     '⚠️ 问题'],
+                  ['action',    '🎯 行动'],
+                  ['reference', '📎 引用'],
+                ] as [CardType, string][]).map(([type, label]) => (
+                  <button
+                    key={type}
+                    onClick={() => handleCreateCard(type)}
+                    className="w-full text-left text-xs px-3 py-2 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 对话节点 */}
           <button
             onClick={handleCreateConversation}
             className="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
           >
             + 对话节点
           </button>
+          {/* Agent节点 */}
           <button
             onClick={handleCreateAgent}
             className="text-xs px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white transition-colors"
@@ -413,6 +505,46 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           </div>
         </div>
       </div>
+
+      {/* 邀请弹窗 */}
+      {showInvite && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowInvite(false)}
+        >
+          <div
+            className="bg-st-surface border border-st-border rounded-xl p-6 w-[420px] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-sm font-semibold text-white">邀请加入 Channel</div>
+              <button onClick={() => setShowInvite(false)} className="text-gray-500 hover:text-white text-lg">✕</button>
+            </div>
+            <div className="text-xs text-gray-400 mb-3">发送以下链接，对方打开即可直接加入：</div>
+            <div className="flex gap-2">
+              <input
+                readOnly
+                value={inviteUrl}
+                className="flex-1 px-3 py-2 bg-st-bg border border-st-border rounded-lg text-xs font-mono text-gray-300 outline-none select-all"
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                onClick={handleCopyInvite}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  copied
+                    ? 'bg-green-600 text-white'
+                    : 'bg-st-indigo hover:bg-indigo-500 text-white'
+                }`}
+              >
+                {copied ? '✓ 已复制' : '复制'}
+              </button>
+            </div>
+            <div className="mt-3 text-xs text-gray-600 font-mono">
+              Channel ID：{channelId}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 画布区域 */}
       <div className="flex-1 relative">
