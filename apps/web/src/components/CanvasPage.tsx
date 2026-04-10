@@ -17,6 +17,7 @@ import { agentBridge, type AgentCommand, type ConversationAppendData } from '../
 import type { ConversationMessage, ConversationShapeProps } from '../shapes/ConversationShape'
 import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServicesShape'
 import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
+import { initMeetingScene } from '../scenes/meeting/initMeeting'
 import { ConversationShapeUtil } from '../shapes/ConversationShape'
 import { AgentShapeUtil } from '../shapes/AgentShape'
 import { SyncThinkCardShapeUtil, type CardType } from '../shapes/SyncThinkCardShape'
@@ -194,10 +195,15 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
 
-    // 本地生活服务场景初始化
+    // 场景初始化
     getChannel(channelId).then((ch) => {
       if (ch?.sceneId === 'local-services-v1') {
         initLocalServicesScene(editor)
+      } else if (ch?.sceneId === 'meeting-v1') {
+        initMeetingScene(editor, {
+          title: ch.name,
+          purpose: (ch.metadata?.purpose as string | undefined) ?? '待填写会议目的',
+        })
       }
     })
 

@@ -22,6 +22,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [showJoin, setShowJoin] = useState(false)
   const [newName, setNewName] = useState('')
+  const [newScene, setNewScene] = useState<'free' | 'meeting-v1'>('free')
   const [joinId, setJoinId] = useState('')
   const [loading, setLoading] = useState(false)
   const [newChannelId, setNewChannelId] = useState<string | null>(null)
@@ -62,7 +63,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
     if (!newName.trim()) return
     setLoading(true)
     try {
-      const ch = await createChannel(newName.trim(), 'free', identity)
+      const ch = await createChannel(newName.trim(), newScene, identity)
       await recordInteraction({
         channelId: ch.channelId,
         actorNodeId: identity.nodeId,
@@ -71,6 +72,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
       })
       setShowCreate(false)
       setNewName('')
+      setNewScene('free')
       // 先显示邀请弹窗，不直接跳转
       setNewChannelId(ch.channelId)
       await loadChannels()
@@ -195,13 +197,33 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
         {showCreate && (
           <div className="mb-6 p-4 bg-st-surface border border-st-border rounded-xl">
             <div className="text-sm text-gray-400 mb-3">新建 Channel</div>
+            {/* 场景选择 */}
+            <div className="flex gap-2 mb-3">
+              {([
+                { id: 'free', label: '🎨 自由白板', desc: '无限画布，自由创作' },
+                { id: 'meeting-v1', label: '🗓️ 会议讨论', desc: '结构化议程 + 决策 + 行动项' },
+              ] as const).map((scene) => (
+                <button
+                  key={scene.id}
+                  onClick={() => setNewScene(scene.id)}
+                  className={`flex-1 p-3 rounded-lg border text-left transition-colors ${
+                    newScene === scene.id
+                      ? 'border-st-indigo bg-st-indigo/10'
+                      : 'border-st-border bg-st-bg hover:border-gray-500'
+                  }`}
+                >
+                  <div className="text-sm font-medium text-white">{scene.label}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{scene.desc}</div>
+                </button>
+              ))}
+            </div>
             <div className="flex gap-2">
               <input
                 autoFocus
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                placeholder="Channel 名称…"
+                placeholder={newScene === 'meeting-v1' ? '会议名称…' : 'Channel 名称…'}
                 className="flex-1 px-3 py-2 bg-st-bg border border-st-border rounded-lg text-sm outline-none focus:border-st-indigo"
               />
               <button
