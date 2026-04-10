@@ -10,20 +10,26 @@
  * WebSocket：
  *   WS /agent/watch?channel=<id>   订阅画布事件推送（canvas→agent 方向）
  *
- * 鉴权（Phase 1 简化模式）：
- *   - 每条 POST 请求 Header 携带 X-Node-Id / X-Timestamp / X-Signature
+ * 鉴权（Phase 2 严格模式）：
  *   - POST /agent/register 无需签名（白名单首次注册）
- *   - 后续 Phase 2 启用严格验证后，注册表直接复用
+ *   - POST /agent/command  必须携带签名 Header：
+ *       X-Node-Id:   SHA-256(publicKey) hex
+ *       X-Timestamp: Unix ms（±30s 内有效，防重放）
+ *       X-Signature: Ed25519.sign(`${commandJson}:${timestamp}`, privateKey) hex
+ *   - nodeId 必须已通过 /agent/register 注册（防陌生节点）
+ *   - 签名验证失败或时间戳超窗口 → 401 Unauthorized
  *
  * 中继机制：
  *   - signaling server 维护 rooms（channelId → Set<ws>），浏览器 tab 订阅对应 room
- *   - Agent 发指令 → agentApi 封装成 syncthink:agent_command → 广播给 room 内所有 tab
+ *   - Agent 发指令 → agentApi 验签通过 → 封装成 syncthink:agent_command → 广播给 room 内所有 tab
  *   - 画布 tab 收到后通过 AgentBridge 执行，结果以 syncthink:agent_event 回推
  *   - agentApi 收到 agent_event → 转发给订阅了该 channel 的 WS /agent/watch 连接
  */
 
 import * as http from 'http'
 import * as WebSocket from 'ws'
+import * as ed from '@noble/ed25519'
+import { createHash } from 'crypto'
 
 export interface AgentApiOptions {
   /** 主 signaling server 的 rooms Map（channelId → Set<WebSocket>） */
@@ -70,6 +76,58 @@ export interface AgentCommandBody {
   }
   /** 可选：Agent 身份（Phase 1 无强制验签，供日志记录用） */
   agentId?: string
+}
+
+// ─── Phase 2 鉴权工具函数 ─────────────────────────────────────────────────────
+
+const REPLAY_WINDOW_MS = 30_000
+
+function fromHex(h: string): Uint8Array {
+  return Uint8Array.from(h.match(/.{2}/g)!.map((b: string) => parseInt(b, 16)))
+}
+
+/**
+ * 验证 /agent/command 请求的 Ed25519 签名
+ *
+ * @param nodeId     X-Node-Id header
+ * @param timestamp  X-Timestamp header（数字字符串）
+ * @param signature  X-Signature header（hex）
+ * @param publicKey  注册时保存的公钥 hex
+ * @param commandBody 请求 body 的原始字符串
+ * @returns { ok: true } 或 { ok: false, reason }
+ */
+async function verifyAgentRequest(
+  nodeId: string,
+  timestamp: string,
+  signature: string,
+  publicKey: string,
+  commandBody: string
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // 1. 时间窗口
+  const ts = parseInt(timestamp, 10)
+  if (isNaN(ts) || Math.abs(Date.now() - ts) > REPLAY_WINDOW_MS) {
+    return { ok: false, reason: 'timestamp_expired' }
+  }
+
+  // 2. 验证 nodeId = SHA-256(publicKey)
+  const expectedNodeId = createHash('sha256').update(Buffer.from(fromHex(publicKey))).digest('hex')
+  if (expectedNodeId !== nodeId) {
+    return { ok: false, reason: 'nodeid_mismatch' }
+  }
+
+  // 3. 验证 Ed25519 签名
+  // 签名载荷格式：`${commandBodyJson}:${timestamp}`
+  try {
+    const message = new TextEncoder().encode(`${commandBody}:${timestamp}`)
+    const sig = fromHex(signature)
+    const pubKey = fromHex(publicKey)
+    const valid = await ed.verifyAsync(sig, message, pubKey)
+    if (!valid) return { ok: false, reason: 'signature_invalid' }
+  } catch {
+    return { ok: false, reason: 'signature_invalid' }
+  }
+
+  return { ok: true }
 }
 
 // ─── 启动函数 ─────────────────────────────────────────────────────────────────
@@ -159,7 +217,34 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
 
     // ── POST /agent/command ────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/agent/command') {
-      readBody(req, (body) => {
+      readBody(req, async (body) => {
+        // ── Phase 2 Ed25519 鉴权 ──────────────────────────────────────────
+        const nodeId    = req.headers['x-node-id'] as string | undefined
+        const timestamp = req.headers['x-timestamp'] as string | undefined
+        const signature = req.headers['x-signature'] as string | undefined
+
+        if (!nodeId || !timestamp || !signature) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'missing auth headers: X-Node-Id, X-Timestamp, X-Signature required' }))
+          return
+        }
+
+        const registration = registrations.get(nodeId)
+        if (!registration) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
+          return
+        }
+
+        const authResult = await verifyAgentRequest(nodeId, timestamp, signature, registration.publicKey, body)
+        if (!authResult.ok) {
+          warn(`auth rejected: nodeId=${nodeId.slice(0, 12)}… reason=${authResult.reason}`)
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
+          return
+        }
+        // ─────────────────────────────────────────────────────────────────
+
         let data: AgentCommandBody
         try {
           data = JSON.parse(body) as AgentCommandBody
@@ -300,10 +385,15 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────
 
-function readBody(req: http.IncomingMessage, callback: (body: string) => void) {
+function readBody(req: http.IncomingMessage, callback: (body: string) => void | Promise<void>) {
   const chunks: Buffer[] = []
   req.on('data', (chunk: Buffer) => chunks.push(chunk))
-  req.on('end', () => callback(Buffer.concat(chunks).toString()))
+  req.on('end', () => {
+    const result = callback(Buffer.concat(chunks).toString())
+    if (result instanceof Promise) {
+      result.catch((err: Error) => console.error('[agent-api] callback error:', err))
+    }
+  })
 }
 
 // 扩展 http.Server 类型，支持 forwardAgentEvent
