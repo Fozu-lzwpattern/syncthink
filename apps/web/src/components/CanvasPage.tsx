@@ -5,13 +5,14 @@
  * - 顶部状态栏：Channel ID、在线人数、返回按钮
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Tldraw } from '@tldraw/tldraw'
+import { Tldraw, type Editor, createShapeId } from '@tldraw/tldraw'
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter } from '../sync/adapter'
 import { joinChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction } from '../interaction/log'
+import { agentBridge, type AgentCommand } from '../agent/server'
 
 interface Props {
   channelId: string
@@ -21,6 +22,7 @@ interface Props {
 
 export function CanvasPage({ channelId, identity, onBack }: Props) {
   const adapterRef = useRef<SyncAdapter | null>(null)
+  const editorRef = useRef<Editor | null>(null)
   const [adapter, setAdapter] = useState<SyncAdapter | null>(null)
   const [peers, setPeers] = useState(0)
   const [syncReady, setSyncReady] = useState(false)
@@ -70,8 +72,57 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     }
   }, [channelId, identity])
 
-  const handleMount = useCallback(() => {
-    // tldraw 挂载完成，可在这里做初始化操作（如加载场景 Schema）
+  const handleMount = useCallback((editor: Editor) => {
+    editorRef.current = editor
+
+    // 监听 Agent 指令（来自 BroadcastChannel / localhost:9527）
+    const handleAgentCommand = (e: Event) => {
+      const cmd = (e as CustomEvent<AgentCommand>).detail
+      const ed = editorRef.current
+      if (!ed) return
+
+      if (cmd.action === 'create' && cmd.shape) {
+        const s = cmd.shape
+        const id = createShapeId()
+        if (s.type === 'text' || s.type === 'sticky') {
+          ed.createShape({
+            id,
+            type: s.type === 'sticky' ? 'note' : 'text',
+            x: s.x,
+            y: s.y,
+            props: {
+              text: s.text ?? '',
+              ...(s.color ? { color: s.color } : {}),
+            },
+          })
+        } else if (s.type === 'geo') {
+          ed.createShape({
+            id,
+            type: 'geo',
+            x: s.x,
+            y: s.y,
+            props: {
+              geo: 'rectangle',
+              w: s.w ?? 200,
+              h: s.h ?? 80,
+              text: s.text ?? '',
+              ...(s.color ? { color: s.color } : {}),
+            },
+          })
+        }
+        agentBridge.emit({ type: 'shape:added', shapeId: id, timestamp: Date.now() })
+      } else if (cmd.action === 'delete' && cmd.id) {
+        ed.deleteShapes([cmd.id as ReturnType<typeof createShapeId>])
+        agentBridge.emit({ type: 'shape:removed', shapeId: cmd.id, timestamp: Date.now() })
+      } else if (cmd.action === 'clear') {
+        ed.selectAll()
+        ed.deleteShapes(ed.getSelectedShapeIds())
+        agentBridge.emit({ type: 'canvas:cleared', timestamp: Date.now() })
+      }
+    }
+
+    window.addEventListener('agent:command', handleAgentCommand)
+    return () => window.removeEventListener('agent:command', handleAgentCommand)
   }, [])
 
   return (
@@ -135,7 +186,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         {adapter && (
           <Tldraw
             store={adapter.store}
-            onMount={handleMount}
+            onMount={handleMount as (editor: Editor) => void}
           />
         )}
       </div>
