@@ -167,6 +167,36 @@ export class AgentClient {
     })
   }
 
+  /**
+   * P3: 生成并发送握手包给信令服务器
+   * 节点加入 y-webrtc room 前，先通过此方法宣告身份
+   *
+   * 握手包签名内容：`${nodeId}:${roomId}:${timestamp}`
+   * 信令服务器验签（AUTH_REQUIRED=true 时），通过后 room 内其他节点收到 peer_joined 事件
+   *
+   * @param signalingWs  已连接的信令 WebSocket
+   * @param roomId       要加入的 room（= channelId）
+   */
+  async joinChannel(signalingWs: WebSocket, roomId: string): Promise<void> {
+    const timestamp = Date.now()
+    const message = `${this.nodeId}:${roomId}:${timestamp}`
+    const msgBytes = new TextEncoder().encode(message)
+    const sigBytes = await ed.signAsync(msgBytes, this.privateKey)
+    const signature = hex(sigBytes)
+
+    const handshake = {
+      type: 'syncthink:join',
+      nodeId: this.nodeId,
+      publicKey: this.publicKey,
+      roomId,
+      timestamp,
+      signature,
+    }
+
+    signalingWs.send(JSON.stringify(handshake))
+    console.log(`[AgentClient] join handshake sent: room=${roomId}, nodeId=${this.nodeId.slice(0, 12)}…`)
+  }
+
   destroy() {
     this.channel.close()
   }

@@ -1,11 +1,19 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    "lib": ["ES2022", "DOM"],
+    "paths": {
+      "ws": ["/mnt/openclaw/.openclaw/workspace/syncthink/node_modules/.pnpm/@types+ws@8.18.1/node_modules/@types/ws"]
+    },
+    "typeRoots": [
+      "/mnt/openclaw/.openclaw/workspace/syncthink/node_modules/.pnpm/@types+node@22.19.17/node_modules/@types",
+      "/mnt/openclaw/.openclaw/workspace/syncthink/node_modules/.pnpm/node_modules/@types"
+    ]
   },
   "include": ["src"]
 }
