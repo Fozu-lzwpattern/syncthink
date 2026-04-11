@@ -56,9 +56,29 @@ interface HandshakePayload {
   /** 可选：Channel 创建者首次加入时携带，信令服务器缓存并对后续加入者执行 */
   accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
   allowedCIDRs?: string[]
+  /**
+   * 可选：新节点加入 whitelist Channel 时携带的邀请码（base64url 编码）
+   * 信令服务器原样透传给 room 内其他成员（特别是 owner），owner 侧完成验签
+   */
+  inviteToken?: string
 }
 
-type IncomingMsg = YjsSignalingMsg | HandshakePayload
+interface PeerAdmitMsg {
+  type: 'syncthink:peer_admit'
+  nodeId: string
+  publicKey: string
+  role: 'owner' | 'editor' | 'viewer'
+  timestamp: number
+}
+
+interface PeerRejectMsg {
+  type: 'syncthink:peer_reject'
+  nodeId: string
+  reason: string
+  timestamp: number
+}
+
+type IncomingMsg = YjsSignalingMsg | HandshakePayload | PeerAdmitMsg | PeerRejectMsg
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
@@ -313,10 +333,12 @@ async function main() {
 
         const room = rooms.get(handshake.roomId)
         if (room) {
+          // 透传 inviteToken（由 owner 侧浏览器验证，信令层不解析）
           const joinEvent = JSON.stringify({
             type: 'syncthink:peer_joined',
             nodeId: handshake.nodeId,
             publicKey: handshake.publicKey,
+            ...(handshake.inviteToken ? { inviteToken: handshake.inviteToken } : {}),
             timestamp: Date.now(),
           })
           room.forEach((peer) => {
@@ -332,6 +354,31 @@ async function main() {
           roomId: handshake.roomId,
           timestamp: Date.now(),
         }))
+        return
+      }
+
+      // ── syncthink:peer_admit / peer_reject — 准入结果广播 ─────────────
+      // owner 侧浏览器完成验证后，通过 publish 将结果广播给 room 内所有成员
+      // 信令服务器原样转发，不解析内容
+      if (msg.type === 'syncthink:peer_admit' || msg.type === 'syncthink:peer_reject') {
+        const admitMsg = msg as PeerAdmitMsg | PeerRejectMsg
+        // 找到该 nodeId 所在的 room（通过 auditLog）
+        const audit = auditLog.get(admitMsg.nodeId)
+        if (audit) {
+          const room = rooms.get(audit.roomId)
+          if (room) {
+            const rawStr = raw.toString()
+            let forwarded = 0
+            room.forEach((peer: WebSocket.WebSocket) => {
+              // 广播给所有成员（包括发送方，使 admit/reject 结果全房间一致）
+              if (peer.readyState === WebSocket.OPEN) {
+                peer.send(rawStr)
+                forwarded++
+              }
+            })
+            log(`${msg.type}: nodeId=${admitMsg.nodeId.slice(0, 12)}… forwarded_to=${forwarded}`)
+          }
+        }
         return
       }
 

@@ -12,7 +12,7 @@ import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldra
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
-import { joinChannel, getChannel } from '../channel/channel'
+import { joinChannel, getChannel, verifyInviteCode, consumeInviteCode } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
 import { agentBridge, type AgentCommand, type ConversationAppendData } from '../agent/server'
@@ -204,9 +204,101 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   useEffect(() => {
     let destroyed = false
 
-    // Agent WS Client（连 signaling，接收 localhost:9527 转发来的 Agent 指令）
-    const wsClient = new AgentWsClient({ channelId, verbose: false })
+    // 从 URL 读 inviteToken（?invite=<base64url>）
+    const urlParams = new URLSearchParams(window.location.search)
+    const inviteToken = urlParams.get('invite') ?? undefined
+
+    // Agent WS Client（连 signaling + 发 syncthink:join 握手）
+    const wsClient = new AgentWsClient({
+      channelId,
+      nodeId: identity.nodeId,
+      publicKey: identity.publicKey,
+      verbose: false,
+      ...(inviteToken ? { inviteToken } : {}),
+    })
     wsClient.start()
+
+    // ── 准入检测：peer_joined → owner 侧判断是否放行 ──────────────────────
+    // 只有 Channel owner 做决策，其他成员只是同步 trustPeer 结果
+    const handlePeerJoined = async (e: Event) => {
+      const { nodeId, publicKey, inviteToken } = (e as CustomEvent<{
+        nodeId: string
+        publicKey: string
+        inviteToken?: string
+        timestamp: number
+      }>).detail
+
+      const channel = await getChannel(channelId)
+      if (!channel) return
+
+      const isOwner = channel.ownerNodeId === identity.nodeId
+
+      if (!isOwner) {
+        // 非 owner：等待 peer_admit 事件到来后再 trustPeer（见 handlePeerAdmit）
+        return
+      }
+
+      // ① 黑名单检查
+      if (channel.bannedNodes?.includes(publicKey)) {
+        wsClient.sendPeerReject(nodeId, 'banned')
+        return
+      }
+
+      const policy = channel.accessPolicy ?? 'whitelist'
+
+      // ② 策略分支
+      if (policy === 'open' || policy === 'lan-only' || policy === 'cidr') {
+        // IP 策略信令层已检查通过，直接放行
+        adapterRef.current?.trustPeer(publicKey)
+        wsClient.sendPeerAdmit(nodeId, publicKey, 'editor')
+        return
+      }
+
+      // policy === 'whitelist'
+      if (channel.trustedNodes?.includes(publicKey)) {
+        // 已在白名单中，直接放行
+        adapterRef.current?.trustPeer(publicKey)
+        wsClient.sendPeerAdmit(nodeId, publicKey, 'editor')
+        return
+      }
+
+      // 不在白名单，检查 inviteCode
+      if (!inviteToken) {
+        wsClient.sendPeerReject(nodeId, 'not_trusted')
+        return
+      }
+
+      const result = await verifyInviteCode(channel, inviteToken, publicKey)
+      if (!result.valid) {
+        wsClient.sendPeerReject(nodeId, result.reason ?? 'invalid_invite')
+        return
+      }
+
+      // 验证通过：消费 token + trustPeer + peer_admit
+      await consumeInviteCode(channelId, (() => {
+        // 从 inviteToken 中提取 oneTimeToken（decodeInviteCode 已在 verifyInviteCode 里调用过）
+        try {
+          const b64 = inviteToken.replace(/-/g, '+').replace(/_/g, '/')
+          const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4)
+          const inv = JSON.parse(atob(padded)) as { oneTimeToken: string }
+          return inv.oneTimeToken
+        } catch {
+          return inviteToken
+        }
+      })(), publicKey)
+
+      adapterRef.current?.trustPeer(publicKey)
+      wsClient.sendPeerAdmit(nodeId, publicKey, 'editor')
+    }
+
+    // ── peer_admit：非 owner 成员收到后同步 trustPeer ───────────────────
+    const handlePeerAdmit = (e: Event) => {
+      const { publicKey } = (e as CustomEvent<{ publicKey: string }>).detail
+      adapterRef.current?.trustPeer(publicKey)
+    }
+
+    window.addEventListener('syncthink:peer_joined', handlePeerJoined)
+    window.addEventListener('syncthink:peer_admit', handlePeerAdmit)
 
     async function init() {
       // 确保本地 Channel 记录存在
@@ -248,6 +340,8 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
     return () => {
       destroyed = true
+      window.removeEventListener('syncthink:peer_joined', handlePeerJoined)
+      window.removeEventListener('syncthink:peer_admit', handlePeerAdmit)
       wsClient.destroy()
       cleanupPromise.then((cleanup) => cleanup?.())
       adapterRef.current?.destroy()
@@ -537,7 +631,29 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   }, [identity, channelId])
 
   // ---- 邀请链接 ----
-  const inviteUrl = `${window.location.origin}${window.location.pathname}?channel=${channelId}&invite=1`
+  const [inviteUrl, setInviteUrl] = useState(
+    `${window.location.origin}${window.location.pathname}?channel=${channelId}`
+  )
+
+  // 打开邀请弹窗时动态生成 inviteCode（whitelist 策略下）
+  const handleOpenInvite = useCallback(async () => {
+    const channel = await getChannel(channelId)
+    const policy = channel?.accessPolicy ?? 'whitelist'
+
+    if (policy === 'whitelist' && channel?.ownerNodeId === identity.nodeId) {
+      // 生成带签名的 inviteCode
+      const { generateInviteCode } = await import('../channel/channel')
+      const encoded = await generateInviteCode(channelId, identity.nodeId)
+      setInviteUrl(
+        `${window.location.origin}${window.location.pathname}?channel=${channelId}&invite=${encoded}`
+      )
+    } else {
+      // open/lan-only/cidr：不需要邀请码，直接拼 channel
+      setInviteUrl(`${window.location.origin}${window.location.pathname}?channel=${channelId}`)
+    }
+
+    setShowInvite(true)
+  }, [channelId, identity.nodeId])
 
   const handleCopyInvite = useCallback(() => {
     navigator.clipboard.writeText(inviteUrl).then(() => {
@@ -563,7 +679,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           </span>
           {/* 邀请按钮 */}
           <button
-            onClick={() => setShowInvite(true)}
+            onClick={handleOpenInvite}
             className="text-xs px-2 py-0.5 rounded border border-st-border text-gray-400 hover:text-white hover:border-gray-500 transition-colors"
           >
             🔗 邀请

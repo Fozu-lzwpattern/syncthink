@@ -24,22 +24,41 @@
  */
 
 import type { AgentCommand } from './server'
+import { signMessage } from '../identity/nodeIdentity'
 
 export interface AgentWsClientOptions {
   channelId: string
+  /** 本节点身份（用于发送 syncthink:join 握手） */
+  nodeId: string
+  publicKey: string
   /** signaling server URL，e.g. ws://localhost:4444 */
   signalingUrl?: string
   /** 重连间隔 ms（默认 3000） */
   reconnectMs?: number
   /** 是否打印日志（默认 true） */
   verbose?: boolean
+  /**
+   * 可选：加入 whitelist Channel 时携带的邀请码（base64url 编码）
+   * 从 URL ?invite= 参数读取
+   */
+  inviteToken?: string
+  /**
+   * 可选：Channel 访问策略（创建者首次加入时携带，供信令服务器缓存）
+   */
+  accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+  allowedCIDRs?: string[]
 }
 
 export class AgentWsClient {
   private channelId: string
+  private nodeId: string
+  private publicKey: string
   private signalingUrl: string
   private reconnectMs: number
   private verbose: boolean
+  private inviteToken?: string
+  private accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+  private allowedCIDRs?: string[]
 
   private ws: WebSocket | null = null
   private destroyed = false
@@ -47,10 +66,14 @@ export class AgentWsClient {
 
   constructor(opts: AgentWsClientOptions) {
     this.channelId = opts.channelId
-    // 默认使用 WS（开发模式），与 vite.config.ts 里的 proxy 协议保持一致
+    this.nodeId = opts.nodeId
+    this.publicKey = opts.publicKey
     this.signalingUrl = opts.signalingUrl ?? `ws://localhost:4444`
     this.reconnectMs = opts.reconnectMs ?? 3000
     this.verbose = opts.verbose ?? true
+    this.inviteToken = opts.inviteToken
+    this.accessPolicy = opts.accessPolicy
+    this.allowedCIDRs = opts.allowedCIDRs
   }
 
   private log(...args: unknown[]) {
@@ -74,13 +97,16 @@ export class AgentWsClient {
       return
     }
 
-    this.ws.addEventListener('open', () => {
+    this.ws.addEventListener('open', async () => {
       this.log(`connected ✅, subscribing room: ${this.channelId}`)
       // 订阅 channel room（与 y-webrtc 使用同一 room 名）
       this.ws!.send(JSON.stringify({
         type: 'subscribe',
         topics: [this.channelId],
       }))
+
+      // 发送 syncthink:join 握手包（宣告身份，触发 peer_joined 广播）
+      await this.sendHandshake()
     })
 
     this.ws.addEventListener('message', (ev) => {
@@ -115,7 +141,48 @@ export class AgentWsClient {
         return
       }
 
-      // 忽略其他类型（pong、syncthink:peer_joined 等）
+      // ── peer_joined — 触发准入检测事件（由 CanvasPage owner 侧处理）──
+      if (msg.type === 'syncthink:peer_joined') {
+        this.log(`→ peer_joined: nodeId=${(msg.nodeId as string)?.slice(0, 12)}…`)
+        window.dispatchEvent(new CustomEvent('syncthink:peer_joined', {
+          detail: {
+            nodeId: msg.nodeId as string,
+            publicKey: msg.publicKey as string,
+            inviteToken: msg.inviteToken as string | undefined,
+            timestamp: msg.timestamp as number,
+          },
+        }))
+        return
+      }
+
+      // ── peer_admit — 其他成员收到后也 trustPeer（全房间一致）──────────
+      if (msg.type === 'syncthink:peer_admit') {
+        this.log(`→ peer_admit: nodeId=${(msg.nodeId as string)?.slice(0, 12)}… role=${msg.role as string}`)
+        window.dispatchEvent(new CustomEvent('syncthink:peer_admit', {
+          detail: {
+            nodeId: msg.nodeId as string,
+            publicKey: msg.publicKey as string,
+            role: msg.role as string,
+            timestamp: msg.timestamp as number,
+          },
+        }))
+        return
+      }
+
+      // ── peer_reject — 日志记录 ──────────────────────────────────────────
+      if (msg.type === 'syncthink:peer_reject') {
+        this.log(`→ peer_reject: nodeId=${(msg.nodeId as string)?.slice(0, 12)}… reason=${msg.reason as string}`)
+        window.dispatchEvent(new CustomEvent('syncthink:peer_reject', {
+          detail: {
+            nodeId: msg.nodeId as string,
+            reason: msg.reason as string,
+            timestamp: msg.timestamp as number,
+          },
+        }))
+        return
+      }
+
+      // 忽略其他类型（pong 等）
     })
 
     this.ws.addEventListener('close', () => {
@@ -153,6 +220,72 @@ export class AgentWsClient {
       channelId: this.channelId,
       ...event,
     })
+  }
+
+  /**
+   * 发送 peer_admit（owner 侧调用：准入通过）
+   * 信令服务器收到后广播给 room 内所有成员
+   */
+  sendPeerAdmit(nodeId: string, publicKey: string, role: 'owner' | 'editor' | 'viewer' = 'editor') {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.log('sendPeerAdmit: WS not ready')
+      return
+    }
+    this.ws.send(JSON.stringify({
+      type: 'syncthink:peer_admit',
+      nodeId,
+      publicKey,
+      role,
+      timestamp: Date.now(),
+    }))
+  }
+
+  /**
+   * 发送 peer_reject（owner 侧调用：准入拒绝）
+   */
+  sendPeerReject(nodeId: string, reason: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.log('sendPeerReject: WS not ready')
+      return
+    }
+    this.ws.send(JSON.stringify({
+      type: 'syncthink:peer_reject',
+      nodeId,
+      reason,
+      timestamp: Date.now(),
+    }))
+  }
+
+  /**
+   * 发送 syncthink:join 握手包（浏览器节点加入 room 时宣告身份）
+   * 信令服务器收到后广播 peer_joined 给 room 内其他成员，触发准入检测
+   */
+  private async sendHandshake(): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    const timestamp = Date.now()
+    const message = `${this.nodeId}:${this.channelId}:${timestamp}`
+    let signature: string
+    try {
+      signature = await signMessage(message)
+    } catch (e) {
+      this.log('handshake sign failed:', e)
+      return
+    }
+
+    const handshake: Record<string, unknown> = {
+      type: 'syncthink:join',
+      nodeId: this.nodeId,
+      publicKey: this.publicKey,
+      roomId: this.channelId,
+      timestamp,
+      signature,
+    }
+    if (this.inviteToken) handshake.inviteToken = this.inviteToken
+    if (this.accessPolicy) handshake.accessPolicy = this.accessPolicy
+    if (this.allowedCIDRs) handshake.allowedCIDRs = this.allowedCIDRs
+
+    this.ws.send(JSON.stringify(handshake))
+    this.log(`handshake sent: nodeId=${this.nodeId.slice(0, 12)}… room=${this.channelId}`)
   }
 
   private scheduleReconnect() {

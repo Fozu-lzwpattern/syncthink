@@ -41,7 +41,49 @@ export interface Channel {
    * accessPolicy='open' 时用于踢出已加入的恶意节点
    */
   bannedNodes?: string[]
+  /**
+   * 已使用的 inviteCode oneTimeToken 列表（防重放）
+   * 每次验证通过后将 token 加入此列表，拒绝重复使用
+   */
+  usedTokens?: string[]
   metadata?: Record<string, unknown>
+}
+
+/**
+ * 邀请码（用于 whitelist 策略下允许新节点加入）
+ *
+ * 生成：由 Channel owner 调用 generateInviteCode()
+ * 使用：新节点携带 inviteToken 参数加入，owner 侧浏览器验证
+ *
+ * 验证流程：
+ * 1. expiry > Date.now()（未过期）
+ * 2. oneTimeToken 未被使用过（channel.usedTokens）
+ * 3. Ed25519 签名验证（owner 私钥签名）
+ */
+export interface InviteCode {
+  channelId: string
+  invitedBy: string        // owner nodeId
+  expiry: number           // Unix ms，默认 now + 24h
+  oneTimeToken: string     // nanoid(16)，防重放
+  signature: string        // Ed25519 sign(channelId + expiry + oneTimeToken, ownerPrivKey)
+}
+
+/**
+ * 准入结果（peer_admit / peer_reject）
+ */
+export interface PeerAdmitMsg {
+  type: 'syncthink:peer_admit'
+  nodeId: string
+  publicKey: string
+  role: 'owner' | 'editor' | 'viewer'
+  timestamp: number
+}
+
+export interface PeerRejectMsg {
+  type: 'syncthink:peer_reject'
+  nodeId: string
+  reason: 'banned' | 'not_trusted' | 'invalid_invite' | 'invite_expired' | 'invite_used'
+  timestamp: number
 }
 
 export interface ChannelMember {
