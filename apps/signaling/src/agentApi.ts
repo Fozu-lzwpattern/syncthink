@@ -27,9 +27,39 @@
  */
 
 import * as http from 'http'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
 import * as WebSocket from 'ws'
 import * as ed from '@noble/ed25519'
 import { createHash } from 'crypto'
+
+// ─── 白名单持久化路径 ──────────────────────────────────────────────────────────
+const TRUSTED_AGENTS_DIR = path.join(os.homedir(), '.syncthink')
+const TRUSTED_AGENTS_PATH = path.join(TRUSTED_AGENTS_DIR, 'trusted-agents.json')
+
+function loadTrustedAgents(): Map<string, AgentRegistration> {
+  try {
+    if (!fs.existsSync(TRUSTED_AGENTS_PATH)) return new Map()
+    const raw = fs.readFileSync(TRUSTED_AGENTS_PATH, 'utf8')
+    const arr = JSON.parse(raw) as AgentRegistration[]
+    const m = new Map<string, AgentRegistration>()
+    for (const r of arr) m.set(r.nodeId, r)
+    return m
+  } catch {
+    return new Map()
+  }
+}
+
+function saveTrustedAgents(registrations: Map<string, AgentRegistration>): void {
+  try {
+    if (!fs.existsSync(TRUSTED_AGENTS_DIR)) fs.mkdirSync(TRUSTED_AGENTS_DIR, { recursive: true })
+    const arr = [...registrations.values()]
+    fs.writeFileSync(TRUSTED_AGENTS_PATH, JSON.stringify(arr, null, 2), 'utf8')
+  } catch (err) {
+    console.warn('[agent-api] ⚠️ failed to save trusted-agents.json:', err)
+  }
+}
 
 export interface AgentApiOptions {
   /** 主 signaling server 的 rooms Map（channelId → Set<WebSocket>） */
@@ -147,8 +177,11 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
     console.warn('[agent-api] ⚠️', ...args)
   }
 
-  /** 已注册的 Agent（nodeId → AgentRegistration） */
-  const registrations = new Map<string, AgentRegistration>()
+  /** 已注册的 Agent（nodeId → AgentRegistration），启动时从磁盘加载 */
+  const registrations = loadTrustedAgents()
+  if (registrations.size > 0) {
+    log(`📂 loaded ${registrations.size} trusted agent(s) from ${TRUSTED_AGENTS_PATH}`)
+  }
 
   /**
    * WS /agent/watch 连接：
@@ -179,10 +212,11 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
         service: 'syncthink-agent-api',
-        version: '1.0.0',
+        version: '1.1.0',
         port,
         channels: channelCount,
         registeredAgents: registrations.size,
+        trustedAgentsPath: TRUSTED_AGENTS_PATH,
         activeWatchers: watcherCount,
         timestamp: Date.now(),
       }))
@@ -204,7 +238,8 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
             publicKey: data.publicKey,
             registeredAt: Date.now(),
           })
-          log(`✅ agent registered: nodeId=${data.nodeId.slice(0, 12)}…`)
+          saveTrustedAgents(registrations)
+          log(`✅ agent registered & persisted: nodeId=${data.nodeId.slice(0, 12)}… → ${TRUSTED_AGENTS_PATH}`)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: true, nodeId: data.nodeId }))
         } catch {

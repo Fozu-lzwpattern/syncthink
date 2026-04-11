@@ -1,5 +1,5 @@
 /**
- * SyncThink 信令服务器 v0.4.0 (Phase 3 + TLS + Agent API)
+ * SyncThink 信令服务器 v0.5.0 (Phase 3 + TLS + Agent API + Network Policy)
  *
  * 职责（纯中转，Zero Trust）：
  * - WebSocket 消息转发：subscribe / unsubscribe / publish
