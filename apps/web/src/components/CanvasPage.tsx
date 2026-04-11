@@ -21,6 +21,12 @@ import type { ConversationMessage, ConversationShapeProps } from '../shapes/Conv
 import { LocalServicesCardShapeUtil } from '../scenes/local-services/LocalServicesShape'
 import { initLocalServicesScene } from '../scenes/local-services/initLocalServices'
 import { initMeetingScene } from '../scenes/meeting/initMeeting'
+import { initResearchScene } from '../scenes/research/initResearch'
+import { initDebateScene } from '../scenes/debate/initDebate'
+import { initKnowledgeMapScene } from '../scenes/knowledge-map/initKnowledgeMap'
+import { ResearchCardShapeUtil } from '../scenes/research/ResearchCardShape'
+import { DebateCardShapeUtil } from '../scenes/debate/DebateCardShape'
+import { KnowledgeMapCardShapeUtil } from '../scenes/knowledge-map/KnowledgeMapCardShape'
 import { ConversationShapeUtil } from '../shapes/ConversationShape'
 import { AgentShapeUtil } from '../shapes/AgentShape'
 import { SyncThinkCardShapeUtil, type CardType } from '../shapes/SyncThinkCardShape'
@@ -32,6 +38,9 @@ const CUSTOM_SHAPE_UTILS = [
   ConversationShapeUtil,
   AgentShapeUtil,
   SyncThinkCardShapeUtil,
+  ResearchCardShapeUtil,
+  DebateCardShapeUtil,
+  KnowledgeMapCardShapeUtil,
 ]
 
 interface Props {
@@ -427,6 +436,27 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           title: ch.name,
           purpose: (ch.metadata?.purpose as string | undefined) ?? '待填写会议目的',
         })
+      } else if (ch?.sceneId === 'research-v1') {
+        initResearchScene(editor, {
+          title: ch.name,
+          background: (ch.metadata?.background as string | undefined),
+          ownerNodeId: identity.nodeId,
+          ownerName: identity.displayName,
+        })
+      } else if (ch?.sceneId === 'debate-v1') {
+        initDebateScene(editor, {
+          topic: ch.name,
+          background: (ch.metadata?.background as string | undefined),
+          ownerNodeId: identity.nodeId,
+          ownerName: identity.displayName,
+        })
+      } else if (ch?.sceneId === 'knowledge-map-v1') {
+        initKnowledgeMapScene(editor, {
+          title: ch.name,
+          domain: (ch.metadata?.domain as string | undefined) ?? ch.name,
+          ownerNodeId: identity.nodeId,
+          ownerName: identity.displayName,
+        })
       }
     })
 
@@ -565,6 +595,125 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     window.addEventListener('agent:command', handleAgentCommand)
     return () => window.removeEventListener('agent:command', handleAgentCommand)
   }, [])
+
+  // ---- 增长场景：rabbit-hole 分裂（Research 场景）----
+  useEffect(() => {
+    const handleSplit = (e: Event) => {
+      const { shapeId, title, expertise } = (e as CustomEvent).detail
+      const ed = editorRef.current
+      if (!ed) return
+      // 1. 标记原 rabbit-hole 卡为 hasSpawned
+      const shape = ed.getShape(shapeId)
+      if (!shape) return
+      const newChannelId = `research-${Date.now().toString(36)}`
+      ed.updateShape({
+        id: shapeId,
+        type: 'research-card',
+        props: {
+          ...(shape.props as Record<string, unknown>),
+          hasSpawned: true,
+          spawnedChannelId: newChannelId,
+        },
+      })
+      // 2. 在原位置旁边创建跨 Channel 引用锚点
+      ed.createShape({
+        id: createShapeId(),
+        type: 'text',
+        x: shape.x + (shape as { props: { w: number } }).props.w + 20,
+        y: shape.y,
+        props: {
+          text: `→ 子 Channel: ${newChannelId}\n主题: ${title}\n所需: ${(expertise as string[]).join(', ')}`,
+          size: 's',
+          color: 'violet',
+          w: 200,
+        },
+      })
+      // 3. 录 Interaction
+      void recordInteraction({
+        channelId,
+        actorNodeId: identity.nodeId,
+        type: 'agent_write',
+        payload: { subAction: 'rabbit_hole_split', newChannelId, title },
+      })
+    }
+    window.addEventListener('research:split-channel', handleSplit)
+    return () => window.removeEventListener('research:split-channel', handleSplit)
+  }, [channelId, identity])
+
+  // ---- 增长场景：gap 填充申请（KnowledgeMap 场景）----
+  useEffect(() => {
+    const handleGapApply = (e: Event) => {
+      const { shapeId, description, requiredExpertise } = (e as CustomEvent).detail
+      const ed = editorRef.current
+      if (!ed) return
+      // 在 gap 卡旁边放一个申请提示（实际场景会弹窗/发消息给 owner）
+      const shape = ed.getShape(shapeId)
+      if (!shape) return
+      ed.createShape({
+        id: createShapeId(),
+        type: 'text',
+        x: shape.x + (shape as { props: { w: number } }).props.w + 16,
+        y: shape.y,
+        props: {
+          text: `🙋 ${identity.displayName} 申请填充\n「${description}」\n所需：${requiredExpertise}`,
+          size: 's',
+          color: 'pink',
+          w: 180,
+        },
+      })
+      void recordInteraction({
+        channelId,
+        actorNodeId: identity.nodeId,
+        type: 'card_created',
+        payload: { subAction: 'gap_fill_application', shapeId },
+      })
+    }
+    window.addEventListener('knowledge-map:apply-fill-gap', handleGapApply)
+    return () => window.removeEventListener('knowledge-map:apply-fill-gap', handleGapApply)
+  }, [channelId, identity])
+
+  // ---- 增长场景：dispute 派生 Debate Channel（KnowledgeMap 场景）----
+  useEffect(() => {
+    const handleForkDebate = (e: Event) => {
+      const { shapeId, description } = (e as CustomEvent).detail
+      const ed = editorRef.current
+      if (!ed) return
+      const shape = ed.getShape(shapeId)
+      if (!shape) return
+      const newDebateChannelId = `debate-${Date.now().toString(36)}`
+      // 标记 dispute 卡为 hasDebateChannel
+      ed.updateShape({
+        id: shapeId,
+        type: 'knowledge-map-card',
+        props: {
+          ...(shape.props as Record<string, unknown>),
+          hasDebateChannel: true,
+          debateChannelId: newDebateChannelId,
+        },
+      })
+      // 在旁边放跨 Channel 引用锚点
+      ed.createShape({
+        id: createShapeId(),
+        type: 'text',
+        x: shape.x + (shape as { props: { w: number } }).props.w + 16,
+        y: shape.y,
+        props: {
+          text: `→ Debate Channel: ${newDebateChannelId}\n辩题: ${description}`,
+          size: 's',
+          color: 'orange',
+          w: 200,
+        },
+      })
+      void recordInteraction({
+        channelId,
+        actorNodeId: identity.nodeId,
+        type: 'agent_write',
+        payload: { subAction: 'dispute_fork_debate', newDebateChannelId, description },
+      })
+    }
+    window.addEventListener('knowledge-map:fork-debate', handleForkDebate)
+    return () => window.removeEventListener('knowledge-map:fork-debate', handleForkDebate)
+  }, [channelId, identity])
 
   // ---- 创建 ConversationNode ----
   const handleCreateConversation = useCallback(() => {

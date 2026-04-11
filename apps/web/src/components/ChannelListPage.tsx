@@ -22,7 +22,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [showJoin, setShowJoin] = useState(false)
   const [newName, setNewName] = useState('')
-  const [newScene, setNewScene] = useState<'free' | 'meeting-v1'>('free')
+  const [newScene, setNewScene] = useState<'free' | 'meeting-v1' | 'research-v1' | 'debate-v1' | 'knowledge-map-v1'>('free')
   const [newAccessPolicy, setNewAccessPolicy] = useState<'whitelist' | 'open' | 'lan-only' | 'cidr'>('whitelist')
   const [newCIDRs, setNewCIDRs] = useState('')
   const [joinId, setJoinId] = useState('')
@@ -233,8 +233,11 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
             {/* 场景选择 */}
             <div className="flex gap-2 mb-3">
               {([
-                { id: 'free', label: '🎨 自由白板', desc: '无限画布，自由创作' },
-                { id: 'meeting-v1', label: '🗓️ 会议讨论', desc: '结构化议程 + 决策 + 行动项' },
+                { id: 'free',              label: '🎨 自由白板',  desc: '无限画布，自由创作' },
+                { id: 'meeting-v1',        label: '🗓️ 会议讨论',  desc: '结构化议程 + 决策 + 行动项' },
+                { id: 'research-v1',       label: '🔬 共同研究',  desc: '跨领域组队 · rabbit-hole 分裂' },
+                { id: 'debate-v1',         label: '⚖️ 观点擂台',  desc: '正反两方 · 立场声明 · 辩论存档' },
+                { id: 'knowledge-map-v1',  label: '🗺️ 知识地图',  desc: 'gap 卡呼叫专家 · 公开发布转化' },
               ] as const).map((scene) => (
                 <button
                   key={scene.id}
@@ -291,7 +294,13 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                placeholder={newScene === 'meeting-v1' ? '会议名称…' : 'Channel 名称…'}
+                placeholder={
+                  newScene === 'meeting-v1' ? '会议名称…'
+                  : newScene === 'research-v1' ? '研究主题…'
+                  : newScene === 'debate-v1' ? '辩题（一句话）…'
+                  : newScene === 'knowledge-map-v1' ? '知识领域名称…'
+                  : 'Channel 名称…'
+                }
                 className="flex-1 px-3 py-2 bg-st-bg border border-st-border rounded-lg text-sm outline-none focus:border-st-indigo"
               />
               <button
