@@ -41,6 +41,8 @@ export interface SyncThinkCardProps {
   isExpanded: boolean
   /** 是否由 Agent 创建（展示 🤖 badge） */
   isAgentCreated: boolean
+  /** 当前用户是否已投票（防止重复投票，本地标记） */
+  hasVoted: boolean
 }
 
 export type SyncThinkCardShape = TLBaseShape<'syncthink-card', SyncThinkCardProps>
@@ -80,6 +82,7 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
     votes: T.number,
     isExpanded: T.boolean,
     isAgentCreated: T.boolean,
+    hasVoted: T.boolean,
   }
 
   override getDefaultProps(): SyncThinkCardProps {
@@ -97,11 +100,12 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
       votes: 0,
       isExpanded: true,
       isAgentCreated: false,
+      hasVoted: false,
     }
   }
 
   override component(shape: SyncThinkCardShape) {
-    const { cardType, title, body, authorName, createdAt, status, tags, votes, isExpanded, isAgentCreated } = shape.props
+    const { cardType, title, body, authorName, createdAt, status, tags, votes, isExpanded, isAgentCreated, hasVoted } = shape.props
     const cfg = TYPE_CONFIG[cardType]
     const statusCfg = STATUS_CONFIG[status]
 
@@ -197,9 +201,33 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
               <span style={{ fontSize: 10, color: '#64748b' }}>{relTime(createdAt)}</span>
 
               <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-                {votes > 0 && (
-                  <span style={{ fontSize: 10, color: '#818cf8' }}>▲ {votes}</span>
-                )}
+                <button
+                  onPointerDown={(ev) => ev.stopPropagation()}
+                  onClick={(ev) => {
+                    ev.stopPropagation()
+                    if (hasVoted) return
+                    window.dispatchEvent(new CustomEvent('syncthink:card_vote', {
+                      detail: { shapeId: shape.id, currentVotes: votes },
+                    }))
+                  }}
+                  title={hasVoted ? '已投票' : '为此卡片投票'}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: hasVoted ? 'default' : 'pointer',
+                    padding: '2px 5px',
+                    borderRadius: 4,
+                    fontSize: 10,
+                    color: hasVoted ? '#818cf8' : '#475569',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 2,
+                    transition: 'color 0.15s',
+                  }}
+                >
+                  <span>▲</span>
+                  <span>{votes > 0 ? votes : ''}</span>
+                </button>
                 <span style={{ fontSize: 10, color: statusCfg.color, border: `1px solid ${statusCfg.color}30`, borderRadius: 4, padding: '1px 5px' }}>
                   {statusCfg.label}
                 </span>

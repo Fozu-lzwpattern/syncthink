@@ -25,6 +25,9 @@ import { initResearchScene } from '../scenes/research/initResearch'
 import { initDebateScene } from '../scenes/debate/initDebate'
 import { initKnowledgeMapScene } from '../scenes/knowledge-map/initKnowledgeMap'
 import { initChatScene } from '../scenes/chat/initChat'
+import { initIntelScene } from '../scenes/intel/initIntel'
+import { initBrainstormScene } from '../scenes/brainstorm/initBrainstorm'
+import { initOkrScene } from '../scenes/okr/initOkr'
 import { ResearchCardShapeUtil } from '../scenes/research/ResearchCardShape'
 import { DebateCardShapeUtil } from '../scenes/debate/DebateCardShape'
 import { KnowledgeMapCardShapeUtil } from '../scenes/knowledge-map/KnowledgeMapCardShape'
@@ -211,6 +214,12 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
   // P4: 软删除确认弹窗
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteEvent | null>(null)
+
+  // Agent 写入确认弹窗
+  const [pendingAgentCmd, setPendingAgentCmd] = useState<{
+    cmd: AgentCommand
+    prompt: string
+  } | null>(null)
 
   // 邀请弹窗
   const [showInvite, setShowInvite] = useState(false)
@@ -519,6 +528,12 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
             ownerNodeId: identity.nodeId,
           })
         }
+      } else if (ch?.sceneId === 'intel-v1') {
+        initIntelScene(editor, ch.name)
+      } else if (ch?.sceneId === 'brainstorm-v1') {
+        initBrainstormScene(editor, ch.name)
+      } else if (ch?.sceneId === 'okr-v1') {
+        initOkrScene(editor, ch.name)
       }
     })
 
@@ -527,6 +542,15 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
       const cmd = (e as CustomEvent<AgentCommand>).detail
       const ed = editorRef.current
       if (!ed) return
+
+      // requiresConfirmation 拦截：暂停执行，等用户确认
+      if (cmd.requiresConfirmation) {
+        setPendingAgentCmd({
+          cmd,
+          prompt: cmd.confirmPrompt ?? `Agent 请求执行 ${cmd.action} 操作，是否允许？`,
+        })
+        return
+      }
 
       if (cmd.action === 'create' && cmd.shape) {
         const s = cmd.shape
@@ -724,7 +748,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
       } else if (cmd.action === 'channel:create' && cmd.channelCreate) {
         // ── Agent 创建新 Channel（选择场景模式）──────────────────────────
         const req = cmd.channelCreate
-        const VALID_SCENES = ['free', 'meeting-v1', 'research-v1', 'debate-v1', 'knowledge-map-v1', 'local-services-v1', 'chat-v1']
+        const VALID_SCENES = ['free', 'meeting-v1', 'research-v1', 'debate-v1', 'knowledge-map-v1', 'local-services-v1', 'chat-v1', 'intel-v1', 'brainstorm-v1', 'okr-v1']
         const sceneId = VALID_SCENES.includes(req.sceneId ?? '') ? (req.sceneId ?? 'free') : 'free'
 
         try {
@@ -775,6 +799,143 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     window.addEventListener('agent:command', handleAgentCommand)
     return () => window.removeEventListener('agent:command', handleAgentCommand)
   }, [])
+
+  // ─── canvas_query 处理（Agent 读取画布状态）──────────────────────────────
+  useEffect(() => {
+    const handleCanvasQuery = async (e: Event) => {
+      const { queryType, requestId, params } = (e as CustomEvent<{
+        queryType: string
+        requestId: string
+        params?: Record<string, unknown>
+      }>).detail
+      const ed = editorRef.current
+      const wsClient = wsClientRef.current
+      if (!wsClient) return
+
+      try {
+        if (queryType === 'get_elements') {
+          const shapes = ed ? ed.getCurrentPageShapes() : []
+          const elements = shapes.map(s => ({
+            id: s.id,
+            type: s.type,
+            x: (s as { x?: number }).x ?? 0,
+            y: (s as { y?: number }).y ?? 0,
+            props: s.props,
+          }))
+          wsClient.sendCanvasQueryResult(requestId, { elements, count: elements.length })
+
+        } else if (queryType === 'get_summary') {
+          const shapes = ed ? ed.getCurrentPageShapes() : []
+          const cardTypes: Record<string, number> = {}
+          let agentCreatedCount = 0
+          for (const s of shapes) {
+            if (s.type === 'syncthink-card') {
+              const ct = (s.props as { cardType?: string }).cardType ?? 'unknown'
+              cardTypes[ct] = (cardTypes[ct] ?? 0) + 1
+              if ((s.props as { isAgentCreated?: boolean }).isAgentCreated) agentCreatedCount++
+            }
+          }
+          wsClient.sendCanvasQueryResult(requestId, {
+            summary: {
+              totalShapes: shapes.length,
+              cardTypes,
+              agentCreatedCount,
+              recentActivity: Date.now(),
+            },
+          })
+
+        } else if (queryType === 'get_scene') {
+          const ch = await getChannel(channelId)
+          const sceneId = ch?.sceneId ?? 'free'
+          const SCENE_NAMES: Record<string, string> = {
+            'free': '自由白板',
+            'meeting-v1': '会议讨论',
+            'research-v1': '共同研究',
+            'debate-v1': '观点擂台',
+            'knowledge-map-v1': '知识地图',
+            'local-services-v1': '本地生活',
+            'chat-v1': '聊天室',
+            'intel-v1': '情报分析',
+            'brainstorm-v1': '头脑风暴',
+            'okr-v1': '目标拆解',
+          }
+          wsClient.sendCanvasQueryResult(requestId, {
+            sceneId,
+            sceneName: SCENE_NAMES[sceneId] ?? sceneId,
+            cardTypeSchema: sceneId,
+          })
+
+        } else if (queryType === 'get_members') {
+          const ch = await getChannel(channelId)
+          const members = ch?.members ?? []
+          wsClient.sendCanvasQueryResult(requestId, {
+            members: members.map(m => ({
+              nodeId: m.nodeId,
+              displayName: m.displayName,
+              role: m.role,
+              isOnline: m.isOnline,
+              joinedAt: m.joinedAt,
+            })),
+            onlineCount: members.filter(m => m.isOnline).length,
+          })
+
+        } else if (queryType === 'get_interactions') {
+          const limit = typeof params?.limit === 'number' ? params.limit : 50
+          const actorNodeId = typeof params?.actorNodeId === 'string' ? params.actorNodeId : undefined
+          const all = await getInteractions(channelId)
+          const filtered = actorNodeId ? all.filter(r => r.actorNodeId === actorNodeId) : all
+          const sliced = filtered.slice(0, limit)
+          wsClient.sendCanvasQueryResult(requestId, {
+            interactions: sliced,
+            count: sliced.length,
+          })
+
+        } else {
+          wsClient.sendCanvasQueryResult(requestId, undefined, `unknown queryType: ${queryType}`)
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        wsClient.sendCanvasQueryResult(requestId, undefined, msg)
+      }
+    }
+
+    window.addEventListener('syncthink:canvas_query', handleCanvasQuery)
+    return () => window.removeEventListener('syncthink:canvas_query', handleCanvasQuery)
+  }, [channelId])
+
+  // ─── 卡片投票处理 ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const handleCardVote = async (e: Event) => {
+      const { shapeId, currentVotes } = (e as CustomEvent<{ shapeId: string; currentVotes: number }>).detail
+      const ed = editorRef.current
+      if (!ed) return
+      const tlId = shapeId as ReturnType<typeof createShapeId>
+      const shape = ed.getShape(tlId)
+      if (!shape || shape.type !== 'syncthink-card') return
+
+      // 更新 votes + hasVoted
+      ed.updateShape({
+        id: tlId,
+        type: 'syncthink-card',
+        props: {
+          votes: currentVotes + 1,
+          hasVoted: true,
+        },
+      })
+
+      // Interaction Log: card_voted
+      await recordInteraction({
+        channelId,
+        actorNodeId: identity.nodeId,
+        targetNodeId: (shape.props as { authorNodeId?: string }).authorNodeId,
+        type: 'card_voted',
+        payload: { shapeId, newVotes: currentVotes + 1 },
+      })
+    }
+
+    window.addEventListener('syncthink:card_vote', handleCardVote)
+    return () => window.removeEventListener('syncthink:card_vote', handleCardVote)
+  }, [channelId, identity.nodeId])
 
   // ---- 增长场景：rabbit-hole 分裂（Research 场景）— 真实创建子 Channel ----
   useEffect(() => {
@@ -1465,6 +1626,68 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
                 className="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
               >
                 确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Agent 写入确认弹窗 */}
+      {pendingAgentCmd && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999,
+        }}>
+          <div style={{
+            background: '#1a1f2e', border: '1px solid #2a3040',
+            borderRadius: 12, padding: '24px 28px', maxWidth: 400, width: '90%',
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0', marginBottom: 8 }}>
+              🤖 Agent 请求确认
+            </div>
+            <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 20, lineHeight: 1.6 }}>
+              {pendingAgentCmd.prompt}
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                onClick={async () => {
+                  await recordInteraction({
+                    channelId,
+                    actorNodeId: identity.nodeId,
+                    type: 'agent_reject',
+                    payload: { action: pendingAgentCmd.cmd.action, prompt: pendingAgentCmd.prompt },
+                  })
+                  setPendingAgentCmd(null)
+                }}
+                style={{
+                  padding: '7px 18px', background: 'transparent',
+                  border: '1px solid #374151', borderRadius: 7,
+                  color: '#94a3b8', cursor: 'pointer', fontSize: 13,
+                }}
+              >
+                拒绝
+              </button>
+              <button
+                onClick={async () => {
+                  const approvedCmd = { ...pendingAgentCmd.cmd, requiresConfirmation: false }
+                  await recordInteraction({
+                    channelId,
+                    actorNodeId: identity.nodeId,
+                    type: 'agent_confirm',
+                    payload: { action: pendingAgentCmd.cmd.action, prompt: pendingAgentCmd.prompt },
+                  })
+                  setPendingAgentCmd(null)
+                  // 重新 dispatch（不带 requiresConfirmation，直接执行）
+                  window.dispatchEvent(new CustomEvent('agent:command', { detail: approvedCmd }))
+                }}
+                style={{
+                  padding: '7px 18px', background: '#4f46e5',
+                  border: 'none', borderRadius: 7,
+                  color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                }}
+              >
+                确认执行
               </button>
             </div>
           </div>

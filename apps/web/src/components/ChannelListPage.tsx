@@ -22,7 +22,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [showJoin, setShowJoin] = useState(false)
   const [newName, setNewName] = useState('')
-  const [newScene, setNewScene] = useState<'free' | 'meeting-v1' | 'research-v1' | 'debate-v1' | 'knowledge-map-v1' | 'chat-v1'>('free')
+  const [newScene, setNewScene] = useState<'free' | 'meeting-v1' | 'research-v1' | 'debate-v1' | 'knowledge-map-v1' | 'chat-v1' | 'local-services-v1' | 'intel-v1' | 'brainstorm-v1' | 'okr-v1'>('free')
   const [newAccessPolicy, setNewAccessPolicy] = useState<'whitelist' | 'open' | 'lan-only' | 'cidr'>('whitelist')
   const [newCIDRs, setNewCIDRs] = useState('')
   const [joinId, setJoinId] = useState('')
@@ -239,6 +239,10 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
                 { id: 'research-v1',       label: '🔬 共同研究',  desc: '跨领域组队 · rabbit-hole 分裂' },
                 { id: 'debate-v1',         label: '⚖️ 观点擂台',  desc: '正反两方 · 立场声明 · 辩论存档' },
                 { id: 'knowledge-map-v1',  label: '🗺️ 知识地图',  desc: 'gap 卡呼叫专家 · 公开发布转化' },
+                { id: 'local-services-v1', label: '🛍️ 本地生活',  desc: '附近服务 · Agent 推荐 · Agentic Commerce' },
+                { id: 'intel-v1',          label: '🔍 情报分析',  desc: '实体/证据/判断三栏 · 关系连线 · 置信度追踪' },
+                { id: 'brainstorm-v1',     label: '🧠 头脑风暴',  desc: '发散→归类→收敛 · 自由想法 · 票选优先级' },
+                { id: 'okr-v1',           label: '🎯 目标拆解',  desc: 'O/KR/Task 树形结构 · 进度追踪 · Agent 拆解' },
               ] as const).map((scene) => (
                 <button
                   key={scene.id}
@@ -300,6 +304,10 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
                   : newScene === 'research-v1' ? '研究主题…'
                   : newScene === 'debate-v1' ? '辩题（一句话）…'
                   : newScene === 'knowledge-map-v1' ? '知识领域名称…'
+                  : newScene === 'local-services-v1' ? '本地生活频道名称…'
+                  : newScene === 'intel-v1' ? '情报分析主题…'
+                  : newScene === 'brainstorm-v1' ? '头脑风暴主题（一句话）…'
+                  : newScene === 'okr-v1' ? '团队/目标名称…'
                   : 'Channel 名称…'
                 }
                 className="flex-1 px-3 py-2 bg-st-bg border border-st-border rounded-lg text-sm outline-none focus:border-st-indigo"

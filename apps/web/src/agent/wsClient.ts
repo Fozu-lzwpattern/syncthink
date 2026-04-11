@@ -225,6 +225,24 @@ export class AgentWsClient {
         return
       }
 
+      // ── 收到 canvas_query 请求 ——————————————————————————————————————————
+      if (msg.type === 'syncthink:canvas_query') {
+        const queryType = msg.queryType as string
+        const requestId = msg.requestId as string
+        if (queryType && requestId) {
+          this.log(`→ canvas_query received: type=${queryType} requestId=${requestId}`)
+          // 派发给 CanvasPage 处理（CanvasPage 负责查 tldraw + IndexedDB 并回包）
+          window.dispatchEvent(new CustomEvent('syncthink:canvas_query', {
+            detail: {
+              queryType,
+              requestId,
+              params: msg.params as Record<string, unknown> | undefined,
+            },
+          }))
+        }
+        return
+      }
+
       // 忽略其他类型（pong 等）
     })
 
@@ -251,6 +269,21 @@ export class AgentWsClient {
       topic: this.channelId,
       ...payload,
     }))
+  }
+
+  /**
+   * 回复 canvas_query（CanvasPage 查询完成后调用）
+   */
+  sendCanvasQueryResult(requestId: string, data: unknown, error?: string) {
+    this.publishEvent({
+      type: 'syncthink:agent_event',
+      channelId: this.channelId,
+      eventType: 'canvas_query_result',
+      requestId,
+      data,
+      error,
+      timestamp: Date.now(),
+    })
   }
 
   /**

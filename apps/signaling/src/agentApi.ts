@@ -7,6 +7,11 @@
  *   POST   /agent/channel/create   创建新 Channel（代理浏览器 tab 执行，支持指定场景模式）
  *   GET    /agent/status           查询服务状态
  *   POST   /agent/register         注册 Agent（提交 nodeId + publicKey，存入内存白名单）
+ *   GET    /canvas/elements        获取指定 channel 画布上的所有元素（需 Ed25519 鉴权）
+ *   GET    /canvas/summary         获取画布摘要统计信息（需 Ed25519 鉴权）
+ *   GET    /canvas/scene           获取画布当前场景信息（需 Ed25519 鉴权）
+ *   GET    /canvas/members         获取 channel 成员列表（需 Ed25519 鉴权）
+ *   GET    /agent/interactions     获取 Agent 交互记录（需 Ed25519 鉴权）
  *
  * WebSocket：
  *   WS /agent/watch?channel=<id>   订阅画布事件推送（canvas→agent 方向）
@@ -104,6 +109,8 @@ export interface AgentCommandBody {
       content: string
       isAgentMessage?: boolean
     }
+    requiresConfirmation?: boolean
+    confirmPrompt?: string
   }
   /** 可选：Agent 身份（Phase 1 无强制验签，供日志记录用） */
   agentId?: string
@@ -161,6 +168,50 @@ async function verifyAgentRequest(
   return { ok: true }
 }
 
+/**
+ * 验证 GET 请求的 Ed25519 签名
+ *
+ * @param nodeId       X-Node-Id header
+ * @param timestamp    X-Timestamp header（数字字符串）
+ * @param signature    X-Signature header（hex）
+ * @param publicKey    注册时保存的公钥 hex
+ * @param pathAndQuery 请求路径 + 查询字符串（url.pathname + url.search）
+ * @returns { ok: true } 或 { ok: false, reason }
+ */
+async function verifyGetRequest(
+  nodeId: string,
+  timestamp: string,
+  signature: string,
+  publicKey: string,
+  pathAndQuery: string
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // 1. 时间窗口
+  const ts = parseInt(timestamp, 10)
+  if (isNaN(ts) || Math.abs(Date.now() - ts) > REPLAY_WINDOW_MS) {
+    return { ok: false, reason: 'timestamp_expired' }
+  }
+
+  // 2. 验证 nodeId = SHA-256(publicKey)
+  const expectedNodeId = createHash('sha256').update(Buffer.from(fromHex(publicKey))).digest('hex')
+  if (expectedNodeId !== nodeId) {
+    return { ok: false, reason: 'nodeid_mismatch' }
+  }
+
+  // 3. 验证 Ed25519 签名
+  // 签名载荷格式：`${pathAndQuery}:${timestamp}`
+  try {
+    const message = new TextEncoder().encode(`${pathAndQuery}:${timestamp}`)
+    const sig = fromHex(signature)
+    const pubKey = fromHex(publicKey)
+    const valid = await ed.verifyAsync(sig, message, pubKey)
+    if (!valid) return { ok: false, reason: 'signature_invalid' }
+  } catch {
+    return { ok: false, reason: 'signature_invalid' }
+  }
+
+  return { ok: true }
+}
+
 // ─── 启动函数 ─────────────────────────────────────────────────────────────────
 
 export function startAgentApi(opts: AgentApiOptions): http.Server {
@@ -197,6 +248,17 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
    */
   const pendingChannelCreates = new Map<string, {
     resolve: (result: { channelId: string; name: string; sceneId: string }) => void
+    reject: (reason: string) => void
+    timer: ReturnType<typeof setTimeout>
+  }>()
+
+  /**
+   * canvas_query 请求的 Promise 解析器
+   * key = requestId, value = { resolve, reject, timer }
+   * 当浏览器侧通过 syncthink:agent_event(canvas_query_result) 返回结果时，resolve 对应 Promise
+   */
+  const pendingCanvasQueries = new Map<string, {
+    resolve: (data: unknown) => void
     reject: (reason: string) => void
     timer: ReturnType<typeof setTimeout>
   }>()
@@ -499,6 +561,212 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
       return
     }
 
+    // ── GET /canvas/* 和 GET /agent/interactions：通用 canvas query 鉴权 + 分发 ──
+
+    const canvasQueryPaths = [
+      '/canvas/elements',
+      '/canvas/summary',
+      '/canvas/scene',
+      '/canvas/members',
+      '/agent/interactions',
+    ]
+
+    if (req.method === 'GET' && canvasQueryPaths.includes(url.pathname)) {
+      void (async () => {
+        // Ed25519 鉴权（GET 请求，签名载荷为 pathname+search:timestamp）
+        const nodeId    = req.headers['x-node-id'] as string | undefined
+        const timestamp = req.headers['x-timestamp'] as string | undefined
+        const signature = req.headers['x-signature'] as string | undefined
+
+        if (!nodeId || !timestamp || !signature) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'missing auth headers: X-Node-Id, X-Timestamp, X-Signature required' }))
+          return
+        }
+
+        const registration = registrations.get(nodeId)
+        if (!registration) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
+          return
+        }
+
+        const pathAndQuery = `${url.pathname}${url.search}`
+        const authResult = await verifyGetRequest(nodeId, timestamp, signature, registration.publicKey, pathAndQuery)
+        if (!authResult.ok) {
+          warn(`canvas query auth rejected: ${authResult.reason}`)
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
+          return
+        }
+
+        // 通用 queryCanvas 辅助函数
+        async function queryCanvas(
+          queryType: string,
+          params: Record<string, unknown>,
+          channelId: string
+        ): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
+          const room = rooms.get(channelId)
+          if (!room || room.size === 0) {
+            return { ok: false, error: 'no_active_canvas_tab' }
+          }
+
+          const requestId = `cq-${queryType}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+          const TIMEOUT_MS = 10_000
+
+          const resultPromise = new Promise<unknown>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              pendingCanvasQueries.delete(requestId)
+              reject('timeout: no response from canvas tab within 10s')
+            }, TIMEOUT_MS)
+
+            pendingCanvasQueries.set(requestId, { resolve, reject, timer })
+          })
+
+          // 广播 syncthink:canvas_query 给 room 内所有 tab
+          const envelope = JSON.stringify({
+            type: 'syncthink:canvas_query',
+            channelId,
+            queryType,
+            params,
+            requestId,
+            timestamp: Date.now(),
+          })
+
+          let forwarded = 0
+          room.forEach((ws) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(envelope)
+              forwarded++
+            }
+          })
+          log(`→ canvas_query forwarded: channel=${channelId} queryType=${queryType} tabs=${forwarded} requestId=${requestId}`)
+
+          try {
+            const data = await resultPromise
+            return { ok: true, data }
+          } catch (err) {
+            return { ok: false, error: typeof err === 'string' ? err : String(err) }
+          }
+        }
+
+        // 解析 channelId（所有端点都需要）
+        const channelId = url.searchParams.get('channel')
+        if (!channelId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'channel query param required' }))
+          return
+        }
+
+        // ── GET /canvas/elements ───────────────────────────────────────────
+        if (url.pathname === '/canvas/elements') {
+          const result = await queryCanvas('get_elements', {}, channelId)
+          if (!result.ok) {
+            const statusCode = result.error === 'no_active_canvas_tab' ? 503 : 504
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: result.error, channelId }))
+            return
+          }
+          const elements = result.data as unknown[]
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ok: true,
+            channelId,
+            elements: Array.isArray(elements) ? elements : [elements],
+            count: Array.isArray(elements) ? elements.length : 1,
+          }))
+          return
+        }
+
+        // ── GET /canvas/summary ────────────────────────────────────────────
+        if (url.pathname === '/canvas/summary') {
+          const result = await queryCanvas('get_summary', {}, channelId)
+          if (!result.ok) {
+            const statusCode = result.error === 'no_active_canvas_tab' ? 503 : 504
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: result.error, channelId }))
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ok: true,
+            channelId,
+            summary: result.data as { totalShapes: number; cardTypes: Record<string, number>; agentCreatedCount: number; recentActivity: unknown[] },
+          }))
+          return
+        }
+
+        // ── GET /canvas/scene ──────────────────────────────────────────────
+        if (url.pathname === '/canvas/scene') {
+          const result = await queryCanvas('get_scene', {}, channelId)
+          if (!result.ok) {
+            const statusCode = result.error === 'no_active_canvas_tab' ? 503 : 504
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: result.error, channelId }))
+            return
+          }
+          const sceneData = result.data as { sceneId: string; sceneName: string; cardTypeSchema: unknown }
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ok: true,
+            channelId,
+            sceneId: sceneData?.sceneId,
+            sceneName: sceneData?.sceneName,
+            cardTypeSchema: sceneData?.cardTypeSchema,
+          }))
+          return
+        }
+
+        // ── GET /canvas/members ────────────────────────────────────────────
+        if (url.pathname === '/canvas/members') {
+          const result = await queryCanvas('get_members', {}, channelId)
+          if (!result.ok) {
+            const statusCode = result.error === 'no_active_canvas_tab' ? 503 : 504
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: result.error, channelId }))
+            return
+          }
+          const members = result.data as unknown[]
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ok: true,
+            channelId,
+            members: Array.isArray(members) ? members : [members],
+            onlineCount: Array.isArray(members) ? members.length : 1,
+          }))
+          return
+        }
+
+        // ── GET /agent/interactions ────────────────────────────────────────
+        if (url.pathname === '/agent/interactions') {
+          const limitParam = url.searchParams.get('limit')
+          const actorNodeId = url.searchParams.get('actorNodeId') ?? undefined
+          const limit = limitParam ? parseInt(limitParam, 10) : undefined
+          const params: Record<string, unknown> = {}
+          if (limit !== undefined && !isNaN(limit)) params.limit = limit
+          if (actorNodeId !== undefined) params.actorNodeId = actorNodeId
+
+          const result = await queryCanvas('get_interactions', params, channelId)
+          if (!result.ok) {
+            const statusCode = result.error === 'no_active_canvas_tab' ? 503 : 504
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: result.error, channelId }))
+            return
+          }
+          const interactions = result.data as unknown[]
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ok: true,
+            channelId,
+            interactions: Array.isArray(interactions) ? interactions : [interactions],
+            count: Array.isArray(interactions) ? interactions.length : 1,
+          }))
+          return
+        }
+      })()
+      return
+    }
+
     // 404
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found', path: url.pathname }))
@@ -587,6 +855,19 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
             })
           }
           log(`✅ channel:created resolved: requestId=${parsed.requestId} channelId=${parsed.newChannelId as string}`)
+        }
+      }
+
+      if (parsed.eventType === 'canvas_query_result' && typeof parsed.requestId === 'string') {
+        const pending = pendingCanvasQueries.get(parsed.requestId)
+        if (pending) {
+          clearTimeout(pending.timer)
+          pendingCanvasQueries.delete(parsed.requestId)
+          if (parsed.error) {
+            pending.reject(parsed.error as string)
+          } else {
+            pending.resolve(parsed.data)
+          }
         }
       }
     } catch {
