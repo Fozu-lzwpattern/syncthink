@@ -1,12 +1,25 @@
-# SyncThink 产品与技术规格说明书 v1.4
+# SyncThink 产品与技术规格说明书 v1.5
 
 > **本地优先、P2P 分布式、多人实时协同的无限结构化画布系统**
 > 团队级分布式思考节点网络 → A2A 社交基础设施
 
 **作者**：李增伟（大仙）+ 喵神  
-**日期**：2026-04-08  
-**状态**：Spec 确认，待开发（v1.4 新增三大增长型场景模式）  
+**日期**：2026-04-11  
+**状态**：v1.5 — 同步实现进展（信令 v0.5.0 访问控制 + Agent API Phase 2 鉴权 + 准入检测系统 Phase 5）  
 **仓库**：https://github.com/Fozu-lzwpattern/syncthink
+
+---
+
+## 版本历史
+
+| 版本 | 日期 | 主要变更 |
+|------|------|---------|
+| v1.0 | 2026-04-06 | 初始 spec，核心架构 + Phase 1 规划 |
+| v1.1 | 2026-04-07 | NodeIdentity + Channel 抽象细化 |
+| v1.2 | 2026-04-08 | Agent API Ed25519 鉴权机制设计 |
+| v1.3 | 2026-04-08 | Interaction Log + Stage 演化路线 |
+| v1.4 | 2026-04-08 | 三大增长型场景模式（Research/Debate/KnowledgeMap）|
+| **v1.5** | **2026-04-11** | **✅ 已实现：信令 v0.5.0 网络访问控制 / Agent API Phase 2 Ed25519 启用 / 准入检测 Phase 5 / 软删除保护 / 快照 Rewind / SyncThinkCardShape / Meeting 场景落地** |
 
 ---
 
@@ -354,15 +367,129 @@ Agent Skill 连接的是本地 ws://localhost:9527
   → 可配置"Agent 写入需人工确认"模式
 ```
 
-### 6.3 邀请码安全属性
+### 6.3 ✅ 已实现：Agent API 安全加固（Phase 2，commit `88e2929`）
 
-| 属性 | 设计 |
-|------|------|
-| 长度 | 12位字母数字，约 3.2×10¹² 种可能，暴力穷举不现实 |
-| 有效期 | 可设置（一次性 / N分钟内 / 永久），默认一次性 |
-| 吊销 | Channel owner 可随时使旧邀请码失效 |
-| 传输 | 不经过信令服务器，由成员自行通过安全渠道传递 |
-| 绑定身份 | 邀请码验证时包含 requesterNodeId + 签名，防止邀请码转让 |
+> 原 v1.2 的 Agent API 鉴权机制设计已于 2026-04-11 完整落地。
+
+**严格签名验证（已启用）**：
+```
+每次 POST /agent/command 必须携带：
+  X-Node-Id: <nodeId>
+  X-Timestamp: <unix_ms>            ← 防重放，±30s 时间窗口
+  X-Signature: <ed25519_sig_hex>    ← sign(body + timestamp, privateKey)
+
+服务端验证链：
+  1. nodeId 是否在白名单（已通过 /agent/register 录入公钥）
+  2. |now - X-Timestamp| < 30s（防重放）
+  3. 用对应公钥验证 Ed25519 签名
+  验证失败 → 401 Unauthorized
+```
+
+**白名单持久化（commit `ffe6872`）**：
+- `trusted-agents.json`：服务端公钥白名单持久化，信令进程重启不丢失
+- CLI 自动调用 `/agent/register` 注册（用户无感）
+
+**SKILL.md 安全策略（v2.0）**：
+- 彻底去除内脏：不暴露 9527 端口/具体 API 端点/Header 名/JSON 格式细节
+- SKILL.md 只描述能力（能做什么），实现细节不出现
+
+### 6.4 ✅ 已实现：网络访问控制策略（信令 v0.5.0，commit `ffe6872`）
+
+> 原 v1.2 spec 中仅有 `whitelist`/`open` 两种策略。v0.5.0 新增两种网络层策略。
+
+**四种访问策略（`Channel.accessPolicy`）**：
+
+| 策略 | 说明 | 适用场景 |
+|------|------|---------|
+| `whitelist` 🔒 | 仅白名单节点可接入（默认） | 私密团队 |
+| `open` 🌐 | 任何人可接入（含邀请码验证） | 公开协作 |
+| `lan-only` 🏠 | **新增** 仅局域网 IP 可接入 | 内网会议室 |
+| `cidr` 🎯 | **新增** 指定 IP 段白名单 | 企业 VPN |
+
+**实现机制**：
+- `Channel` interface 新增 `accessPolicy` + `allowedCIDRs?: string[]` 字段
+- 信令服务器 v0.5.0 新增 `isPrivateIP()` / `cidrMatch()` / `checkNetworkPolicy()`
+- IP 检查基于 `req.socket.remoteAddress`（服务器侧真实 IP，**客户端无法伪造**）
+- 握手时三步验证：Ed25519 签名 → 注册策略 → IP 策略检查
+- ChannelListPage UI：新建时 4 选 1 策略面板，CIDR 策略时显示 IP 段输入框
+
+### 6.5 ✅ 已实现：准入检测系统 Phase 5（commit `e659029`）
+
+> 修复了核心架构 Bug：`AgentWsClient` 之前从未发送 `syncthink:join` 握手包，导致信令服务器永远不广播 `peer_joined`，整套准入链路无法启动。
+
+**准入检测完整实现**：
+
+```
+peer_joined → ① 黑名单检查（bannedNodes）→ 命中：peer_reject('banned')
+            → ② 策略分支：
+                open/lan-only/cidr → 直接 trustPeer + peer_admit（广播全房间）
+                whitelist + 已在 trustedNodes → 直接 trustPeer + peer_admit
+                whitelist + 未知 + 无 inviteToken → peer_reject('not_trusted')
+                whitelist + 未知 + 有 inviteToken：
+                  → verifyInviteCode（expiry + oneTimeToken 防重放 + channelId）
+                  → 通过：consumeInviteCode + trustPeer + peer_admit
+                  → 失败：peer_reject(reason)
+            
+peer_admit 广播 → 全房间所有 peer 调用 trustPeer(publicKey)（实现多 peer 一致）
+```
+
+**新增数据结构**：
+
+```typescript
+interface InviteCode {
+  channelId: string
+  invitedBy: string       // owner nodeId
+  expiry: number          // 过期时间戳（默认 +24h）
+  oneTimeToken: string    // UUID，防重放
+  signature: string       // Ed25519 签名（⚠️ Phase 6 待完整实现：owner publicKey 存储待完善）
+}
+
+// Channel 新增字段
+interface Channel {
+  // ...原有字段...
+  usedTokens?: string[]   // 已消费 token 列表（防重放）
+}
+```
+
+**邀请链接动态生成**：
+- whitelist + owner：`generateInviteCode()` 将签名邀请码嵌入 URL（`?channel=xxx&invite=<code>`）
+- 其他策略：直接拼 `?channel=xxx`（无需邀请码验证）
+- 🔗 邀请按钮改为异步生成链接再弹窗
+
+**新增函数体系**：
+| 函数 | 位置 | 说明 |
+|------|------|------|
+| `generateInviteCode()` | `channel/channel.ts` | 生成 base64url 编码邀请码，Ed25519 签名 |
+| `decodeInviteCode()` | `channel/channel.ts` | 解码还原 InviteCode 对象 |
+| `verifyInviteCode()` | `channel/channel.ts` | 验证 expiry + token 未使用 + channelId |
+| `consumeInviteCode()` | `channel/channel.ts` | 消费 token + 写入 trustedNodes |
+
+### 6.6 ✅ 已实现：CRDT 删除保护（commit `888ac86`）
+
+> 解决了 CRDT 删除语义的安全隐患：任何节点清空画布会不可逆地同步给所有 peer（含离线 peer 上线后）。
+
+**方案 B — 软删除确认**：
+- `adapter.ts`：单次删除 ≥5 个 shape → 拦截，暂停 Yjs delete，触发确认回调
+  - `confirm()` → 真正写 Yjs delete，P2P 广播
+  - `cancel()` → `store.mergeRemoteChanges` 恢复 shape，不广播
+- `CanvasPage.tsx`：确认弹窗，展示删除数量 + 不可逆警告
+
+**方案 C — 快照 Rewind**：
+- `sync/snapshots.ts`（新文件）：`Y.encodeStateAsUpdate` 序列化，base64 存 IndexedDB，保留最近 50 个
+- 每 60s 或每 10 次操作自动打快照
+- `ReviewTimeline` 重构：滑块刻度点标示快照位置，拖动 → rewindToSnapshot
+- 只读蒙层 + `📼 历史回放模式` badge，退出 Review 恢复 live
+
+### 6.7 邀请码安全属性
+
+| 属性 | 设计 | 实现状态 |
+|------|------|---------|
+| 长度 | 12位字母数字，约 3.2×10¹² 种可能，暴力穷举不现实 | ✅ |
+| 有效期 | 可设置（一次性 / N分钟内 / 永久），默认 24h | ✅ `expiry` 字段 |
+| 防重放 | `oneTimeToken`（UUID），消费后写入 `usedTokens` 列表 | ✅ |
+| 吊销 | Channel owner 可随时使旧邀请码失效 | 🔲 Phase 6 |
+| 传输 | 不经过信令服务器，信令层透传 inviteToken 但不解析 | ✅ |
+| 绑定身份 | owner Ed25519 签名 + channelId 绑定，防转让 | ⚠️ Phase 6（owner publicKey 存储待完善）|
 
 ---
 
@@ -370,23 +497,25 @@ Agent Skill 连接的是本地 ws://localhost:9527
 
 **本地 WebSocket 服务，默认端口 `9527`，随 SyncThink 客户端启动自动运行。**
 
-### 7.0 鉴权机制：Ed25519 签名（Phase 1 起）
+> ✅ **实现状态（2026-04-11）**：HTTP+WS 双协议服务已完整落地（commit `b39483c`）。Ed25519 Phase 2 严格鉴权已启用（commit `88e2929`）。
+
+### 7.0 鉴权机制：Ed25519 签名（✅ Phase 2 已启用）
 
 **设计原则**：不用 token（会话级，重启失效），改用节点身份签名（永久有效，可跨节点验证）。
 
 ```
-每个 API 请求携带：
+每个写入 API 请求必须携带：
   Header: X-Node-Id: <nodeId>
-  Header: X-Timestamp: <unix_ms>            ← 防重放（5分钟窗口）
+  Header: X-Timestamp: <unix_ms>            ← 防重放（±30s 时间窗口）
   Header: X-Signature: <ed25519_sig_hex>    ← sign(body + timestamp, privateKey)
 
-服务端验证：
-  1. 查询 nodeId 是否已注册（/agent/register 时录入公钥）
-  2. 验证时间戳（|now - timestamp| < 5min）
-  3. 用对应公钥验证签名
-  4. 验证通过 → 执行操作，拒绝 → 401
+服务端验证链（agentApi.ts，Phase 2 已启用严格模式）：
+  1. nodeId 是否在白名单（trusted-agents.json 持久化）
+  2. |now - X-Timestamp| < 30s（防重放）
+  3. 用白名单中对应公钥验证 Ed25519 签名
+  4. 验证通过 → 执行操作，拒绝 → 401 Unauthorized
 
-Phase 1：只验证本地节点（ownerNodeId 必须是本节点）
+Phase 2（当前）：严格验证，白名单持久化，重启不丢失
 Stage 2：可验证任意远端节点签名（同样机制，不需改接口）
 ```
 
@@ -800,61 +929,86 @@ Agent 能力：
 
 ## 九、开发路线图
 
-### Phase 1 — MVP（目标：A2A 网络节点 v0 + 团队能用起来，预计 ~17h）
+### Phase 1 — MVP（✅ 核心已落地，持续迭代中）
+
+> **实现进度截至 2026-04-11**
 
 #### 基础设施（A2A 网络地基）
 
-| 任务 | 优先级 | 估时 | 说明 |
+| 任务 | 优先级 | 状态 | 说明 |
 |------|--------|------|------|
-| 项目脚手架（Vite + React + TS + pnpm monorepo） | P0 | 0.5h | |
-| **NodeIdentity 持久化身份**（Ed25519 + IndexedDB） | **P0** | **0.5h** | **A2A 基础，首次启动自动生成** |
-| Yjs + y-webrtc 多人同步 | P0 | 2h | 核心同步逻辑 |
-| y-indexeddb 本地持久化 | P0 | 0.5h | |
-| **Channel 抽象**（替代 Room，含 type 字段预留） | **P0** | **0.5h** | **持久信道语义，Stage 2 零返工** |
+| 项目脚手架（Vite + React + TS + pnpm monorepo） | P0 | ✅ | |
+| **NodeIdentity 持久化身份**（Ed25519 + IndexedDB） | **P0** | ✅ | nodeIdentity.ts + keystore.ts，私钥隔离存储 |
+| Yjs + y-webrtc 多人同步 | P0 | ✅ | CRDT 核心同步，adapter.ts |
+| y-indexeddb 本地持久化 | P0 | ✅ | |
+| **Channel 抽象**（替代 Room，含 type 字段预留） | **P0** | ✅ | channel/types.ts，含 persistent 类型预留 |
 
 #### 画布功能
 
-| 任务 | 优先级 | 估时 | 说明 |
+| 任务 | 优先级 | 状态 | 说明 |
 |------|--------|------|------|
-| tldraw 基础集成 | P0 | 1h | 自定义 SyncThinkCard Shape |
-| 自由模式画布 | P0 | 1h | 不受场景约束 |
-| Channel 创建/加入 UI + 邀请码机制 | P1 | 1.5h | 邀请码含 nodeId 签名验证 |
-| 会议讨论场景模式（强约束） | P1 | 3h | 第一个场景 Schema 落地 |
+| tldraw 基础集成 | P0 | ✅ | |
+| 自由模式画布 | P0 | ✅ | |
+| **SyncThinkCardShape（五种类型）** | **P0** | ✅ | commit `fc197e7`：idea/decision/issue/action/reference |
+| Channel 创建/加入 UI + 邀请链接 | P1 | ✅ | commit `fc197e7`，邀请弹窗 + 一键复制 |
+| 会议讨论场景模式（meeting-v1） | P1 | ✅ | commit `c828753`，三栏布局 + 5种卡片类型 |
+| 画布快照 / 历史回放（Rewind） | P1 | ✅ | commit `888ac86`，snapshots.ts，滑块时间线 |
+| 软删除保护（≥5 个 shape 确认弹窗） | P1 | ✅ | commit `888ac86`，adapter.ts 拦截 |
+| 网络访问控制（lan-only / CIDR） | P1 | ✅ | commit `ffe6872`，信令 v0.5.0 |
+| 准入检测系统（peer_joined → admit/reject） | P1 | ✅ | commit `e659029`，完整链路 |
 
 #### Agent 接入层
 
-| 任务 | 优先级 | 估时 | 说明 |
+| 任务 | 优先级 | 状态 | 说明 |
 |------|--------|------|------|
-| **Agent API 签名鉴权**（Ed25519，`@noble/ed25519`） | **P1** | **1.5h** | **鉴权一次做对，Stage 2 直接扩展** |
-| Agent 本地 WS 接口（读+写） | P1 | 2h | localhost:9527 |
-| AgentIdentity 光标 + 卡片标识 | P1 | 1h | 区分人/Agent 操作 |
-| **Interaction Log**（IndexedDB 本地记录，Phase 1 只记不用） | **P1** | **1h** | **信誉原材料，Stage 4 直接复用** |
+| Agent 本地 WS 接口（HTTP+WS） | P1 | ✅ | commit `b39483c`，agentApi.ts，port 9527 |
+| **Agent API Ed25519 签名鉴权** | **P1** | ✅ | commit `88e2929`，Phase 2 严格模式已启用，±30s 防重放 |
+| **白名单持久化** | **P1** | ✅ | commit `ffe6872`，trusted-agents.json |
+| syncthink-skill 封装 | P1 | ✅ | v2.0，去内脏，只暴露能力描述 |
+| AgentIdentity 光标 + 卡片标识 | P1 | 🔲 | syncthink-card 已有 isAgentCreated 字段，光标颜色区分待实现 |
+| **Interaction Log** | **P1** | 🔲 | 结构已设计，IndexedDB 记录待实现 |
+| Agent 写入确认机制 | P2 | 🔲 | Phase 2 |
 
-#### 基础设施
+#### 信令服务器
 
-| 任务 | 优先级 | 估时 | 说明 |
-|------|--------|------|------|
-| 信令服务器配置（apps/signaling） | P1 | 0.5h | 极简 Node |
+| 任务 | 状态 | commit | 说明 |
+|------|------|--------|------|
+| 基础信令（v0.3.0） | ✅ | 初始 | 极简 Node，WS 握手 |
+| Ed25519 握手验签 + Agent API（v0.4.0） | ✅ | `b39483c` + `88e2929` | 严格签名验证 |
+| lan-only + CIDR 网络策略（v0.5.0） | ✅ | `ffe6872` | IP 层访问控制 |
+| peer_joined 透传 inviteToken | ✅ | `e659029` | 准入检测链路 |
+| peer_admit / peer_reject 消息路由 | ✅ | `e659029` | 全房间广播 |
 
-#### 汇总
+#### 已落地 commit 完整列表（2026-04-11）
 
-| 类别 | 估时 |
-|------|------|
-| 原有任务 | ~13h |
-| **新增 A2A 基础（4项）** | **~3.5h** |
-| **Phase 1 总计** | **~16.5h** |
+| commit | 内容 |
+|--------|------|
+| `fc197e7` | P0-1 邀请链接 UI + P0-2 SyncThinkCardShape（五种类型） |
+| `c828753` | P0-3 会议讨论场景 meeting-v1（三栏布局） |
+| `b39483c` | P1-4 Agent API localhost:9527 HTTP+WS + AgentWsClient |
+| `51a3b66` | syncthink-card Agent 创建支持 + syncthink-skill v1.0 |
+| `88e2929` | Phase 2 Ed25519 严格鉴权启用 + SKILL.md v2.0 去内脏 |
+| `888ac86` | 软删除确认弹窗 + 快照 Rewind 时间线 |
+| `ffe6872` | 信令 v0.5.0（lan-only + CIDR）+ trusted-agents.json 持久化 |
+| `e659029` | 准入检测 Phase 5（InviteCode + peer_admit/reject 全链路）|
 
-> **新增 4 项的价值**：Phase 1 建出来的不是"一个协作工具"，而是 **A2A 网络的第一个节点**。身份、信道抽象、签名鉴权、交互历史——这四块是整个 A2A 演化路径的地基，现在不加，后面全部返工。
+### Phase 6 — 待完善（近期）
+
+- [ ] Interaction Log 实现（IndexedDB 本地记录，Phase 1 只记不用）
+- [ ] AgentIdentity 光标颜色区分（人/Agent 视觉分离）
+- [ ] InviteCode Ed25519 完整验签（需补充 owner publicKey 到 Channel members）
+- [ ] 邀请码吊销机制（`/agent/revoke` + revoked.json 黑名单）
+- [ ] 真实浏览器 tab 端到端验证（curl → 卡片出现在画布）
+- [ ] Go CLI wrapper（Phase 2 计划书路线图：代理转发，不直连 9527）
+- [ ] 注册需主人签名授权（Phase 3：类 SSH authorized_keys）
 
 ### Phase 2 — 完整产品
 
 - 完整七大场景模式（含增长型三场景的完整 Schema + UI）
 - 角色权限系统完整实现（踢人/变更权限 UI）
 - 用户自定义 + 发布 Schema（场景市场）
-- Agent 写入确认机制（人工审批流）
 - syncthink-skill 打包（OpenClaw + Claude Code 双版本）
 - Tauri 桌面端打包（自带本地 WS，更贴合 Claw 本地运行）
-- 画布快照 / 历史回放
 - Interaction Log quality 字段自动评估（Agent 打分）
 
 ### Stage 2 — Agent 长期信道网络（Phase 1 基础设施直接支撑）
@@ -1048,6 +1202,11 @@ syncthink/
 | **rabbit-hole 分裂** | **子 Channel 继承父 Channel 上下文** | **降低子课题启动成本，同时实现 Channel 图谱式增殖** |
 | **Debate 立场声明** | **强制 stance 字段（for/against/neutral）** | **降低模糊游走，增强参与感，驱动双侧网络增长** |
 | **KnowledgeMap 公开只读** | **只读链接 + gap 卡转化入口** | **将地图完整度飞轮与用户增长飞轮绑定，长尾吸引领域专家** |
+| **网络访问控制** | **四层策略：whitelist/open/lan-only/cidr（✅ 已实现）** | **IP 检查在服务器侧，客户端无法伪造；局域网/企业内网场景支持** |
+| **准入检测位置** | **owner 浏览器侧（✅ 已实现）** | **trustedNodes/bannedNodes 在本地 IndexedDB，只有 owner 有完整判断权；防止多 editor 竞态** |
+| **InviteCode 防重放** | **oneTimeToken + usedTokens 列表（✅ 已实现）** | **每个邀请码只能消费一次，消费即存档，不依赖服务端 session** |
+| **CRDT 删除保护** | **软删除确认（≥5）+ 快照 Rewind（✅ 已实现）** | **CRDT delete 是不可逆的；两层保护：事前确认 + 事后回滚** |
+| **SKILL.md 安全策略** | **只描述能力，不暴露端点/协议/实现（✅ v2.0 已实现）** | **防止通过 Skill 文件逆向分析内部架构；真正护城河是设计理念+执行速度** |
 
 ---
 
