@@ -37,11 +37,31 @@ export interface ConversationAppendData {
   isAgentMessage?: boolean
 }
 
+export interface AgentChannelCreateData {
+  /** 新 Channel 名称 */
+  name: string
+  /**
+   * 场景模式（可选）
+   * free / meeting-v1 / research-v1 / debate-v1 / knowledge-map-v1 / local-services-v1
+   */
+  sceneId?: string
+  /** 访问策略（可选，默认 whitelist） */
+  accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+  allowedCIDRs?: string[]
+  /**
+   * 请求追踪 ID（由 agentApi 生成，浏览器侧响应时携带，
+   * 用于 agentApi 将响应 Promise 与请求对应）
+   */
+  requestId: string
+}
+
 export interface AgentCommand {
-  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append'
+  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append' | 'channel:create'
   shape?: AgentShape
   id?: string
   conversationAppend?: ConversationAppendData
+  /** channel:create 专用参数 */
+  channelCreate?: AgentChannelCreateData
   /** 发出此指令的 Agent nodeId，用于 Interaction Log 记录 */
   agentNodeId?: string
 }

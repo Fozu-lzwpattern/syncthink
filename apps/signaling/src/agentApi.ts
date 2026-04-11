@@ -4,6 +4,7 @@
  *
  * HTTP 端点：
  *   POST   /agent/command          发送画布指令（转发给指定 channelId 内的画布 tab）
+ *   POST   /agent/channel/create   创建新 Channel（代理浏览器 tab 执行，支持指定场景模式）
  *   GET    /agent/status           查询服务状态
  *   POST   /agent/register         注册 Agent（提交 nodeId + publicKey，存入内存白名单）
  *
@@ -189,6 +190,17 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
    */
   const watchers = new Map<string, Set<WebSocket.WebSocket>>()
 
+  /**
+   * channel:create 请求的 Promise 解析器
+   * key = requestId, value = { resolve, reject, timer }
+   * 当浏览器侧通过 syncthink:agent_event(channel:created) 返回结果时，resolve 对应 Promise
+   */
+  const pendingChannelCreates = new Map<string, {
+    resolve: (result: { channelId: string; name: string; sceneId: string }) => void
+    reject: (reason: string) => void
+    timer: ReturnType<typeof setTimeout>
+  }>()
+
   // ─── HTTP 服务器 ────────────────────────────────────────────────────────────
 
   const server = http.createServer((req, res) => {
@@ -212,12 +224,13 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
         service: 'syncthink-agent-api',
-        version: '1.1.0',
+        version: '1.2.0',
         port,
         channels: channelCount,
         registeredAgents: registrations.size,
         trustedAgentsPath: TRUSTED_AGENTS_PATH,
         activeWatchers: watcherCount,
+        pendingChannelCreates: pendingChannelCreates.size,
         timestamp: Date.now(),
       }))
       return
@@ -245,6 +258,152 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'invalid JSON' }))
+        }
+      })
+      return
+    }
+
+    // ── POST /agent/channel/create ─────────────────────────────────────────
+    if (req.method === 'POST' && url.pathname === '/agent/channel/create') {
+      readBody(req, async (body) => {
+        // Phase 2 Ed25519 鉴权（与 /agent/command 相同）
+        const nodeId    = req.headers['x-node-id'] as string | undefined
+        const timestamp = req.headers['x-timestamp'] as string | undefined
+        const signature = req.headers['x-signature'] as string | undefined
+
+        if (!nodeId || !timestamp || !signature) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'missing auth headers' }))
+          return
+        }
+        const registration = registrations.get(nodeId)
+        if (!registration) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
+          return
+        }
+        const authResult = await verifyAgentRequest(nodeId, timestamp, signature, registration.publicKey, body)
+        if (!authResult.ok) {
+          warn(`channel/create auth rejected: ${authResult.reason}`)
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
+          return
+        }
+
+        // 解析请求体
+        let data: {
+          name: string
+          sceneId?: string
+          accessPolicy?: string
+          allowedCIDRs?: string[]
+          /** 可选：指定哪个 channelId 的浏览器 tab 来代为执行创建操作 */
+          proxyChannelId?: string
+        }
+        try {
+          data = JSON.parse(body)
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid JSON' }))
+          return
+        }
+
+        if (!data.name || typeof data.name !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'name is required' }))
+          return
+        }
+
+        // 找到一个有活跃浏览器 tab 的 channel 来代理执行创建
+        // 优先使用请求方指定的 proxyChannelId，否则找 rooms 中第一个有 tab 的
+        let proxyRoom: Set<WebSocket.WebSocket> | undefined
+        let proxyChannelId: string | undefined
+
+        if (data.proxyChannelId) {
+          const r = rooms.get(data.proxyChannelId)
+          if (r && r.size > 0) {
+            proxyRoom = r
+            proxyChannelId = data.proxyChannelId
+          }
+        }
+        if (!proxyRoom) {
+          for (const [cid, room] of rooms.entries()) {
+            if (room.size > 0) {
+              proxyRoom = room
+              proxyChannelId = cid
+              break
+            }
+          }
+        }
+
+        if (!proxyRoom || !proxyChannelId) {
+          res.writeHead(503, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            error: 'no_active_canvas_tab',
+            message: 'No browser tab is currently connected. Open a SyncThink canvas in your browser first.',
+          }))
+          return
+        }
+
+        // 生成 requestId 并注册 Promise
+        const requestId = `ch-create-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const TIMEOUT_MS = 12_000
+
+        const resultPromise = new Promise<{ channelId: string; name: string; sceneId: string }>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            pendingChannelCreates.delete(requestId)
+            reject('timeout: no response from canvas tab within 12s')
+          }, TIMEOUT_MS)
+
+          pendingChannelCreates.set(requestId, { resolve, reject, timer })
+        })
+
+        // 组装 channel:create 指令，发给代理 tab
+        const command = {
+          action: 'channel:create',
+          channelCreate: {
+            name: data.name,
+            sceneId: data.sceneId ?? 'free',
+            accessPolicy: data.accessPolicy ?? 'whitelist',
+            allowedCIDRs: data.allowedCIDRs,
+            requestId,
+          },
+          agentNodeId: nodeId,
+        }
+        const envelope = JSON.stringify({
+          type: 'syncthink:agent_command',
+          channelId: proxyChannelId,
+          command,
+          agentId: 'channel-create',
+          timestamp: Date.now(),
+        })
+
+        let forwarded = 0
+        proxyRoom.forEach((ws) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(envelope)
+            forwarded++
+          }
+        })
+        log(`→ channel:create forwarded to proxy channel=${proxyChannelId} tabs=${forwarded} requestId=${requestId}`)
+
+        // 等待浏览器 tab 响应
+        try {
+          const result = await resultPromise
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ok: true,
+            channelId: result.channelId,
+            name: result.name,
+            sceneId: result.sceneId,
+            requestId,
+          }))
+        } catch (err) {
+          res.writeHead(504, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            error: 'channel_create_failed',
+            reason: typeof err === 'string' ? err : String(err),
+            requestId,
+          }))
         }
       })
       return
@@ -395,19 +554,46 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
     console.log(`  WS   ✅  ws://${host}:${port}/agent/watch?channel=<id>`)
     console.log('')
     console.log(`  端点：`)
-    console.log(`    POST /agent/register    注册 Agent`)
-    console.log(`    POST /agent/command     发送画布指令`)
-    console.log(`    GET  /agent/status      查询状态`)
+    console.log(`    POST /agent/register         注册 Agent`)
+    console.log(`    POST /agent/command          发送画布指令`)
+    console.log(`    POST /agent/channel/create   创建新 Channel（支持选择场景）`)
+    console.log(`    GET  /agent/status           查询状态`)
     console.log('')
   })
 
   /**
    * 供 signaling 主服务器调用：把画布 tab 推送的 agent_event 转发给 watchers
+   * 同时处理 channel:created 响应，resolve 对应的 pendingChannelCreates Promise
    *
    * @param channelId  来源 channel
    * @param event      事件对象（已 JSON 序列化）
    */
   server.forwardAgentEvent = (channelId: string, event: string) => {
+    // 检查是否是 channel:created 响应，如果是则 resolve 等待中的 Promise
+    try {
+      const parsed = JSON.parse(event) as Record<string, unknown>
+      if (parsed.eventType === 'channel:created' && typeof parsed.requestId === 'string') {
+        const pending = pendingChannelCreates.get(parsed.requestId)
+        if (pending) {
+          clearTimeout(pending.timer)
+          pendingChannelCreates.delete(parsed.requestId)
+          if (parsed.error) {
+            pending.reject(parsed.error as string)
+          } else {
+            pending.resolve({
+              channelId: parsed.newChannelId as string,
+              name: parsed.channelName as string,
+              sceneId: parsed.sceneId as string,
+            })
+          }
+          log(`✅ channel:created resolved: requestId=${parsed.requestId} channelId=${parsed.newChannelId as string}`)
+        }
+      }
+    } catch {
+      // 非 JSON 或解析失败，忽略
+    }
+
+    // 转发给 /agent/watch 订阅者
     const channelWatchers = watchers.get(channelId)
     if (!channelWatchers || channelWatchers.size === 0) return
     channelWatchers.forEach((ws) => {

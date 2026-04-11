@@ -124,12 +124,55 @@ export class AgentWsClient {
 
         this.log(`→ agent command received: action=${command.action}`)
 
+        // channel:create 需要等待浏览器侧执行结果，通过特殊事件回传
+        // CanvasPage 处理后会触发 'agent:channel:created' 事件并传入结果
+        // wsClient 监听该事件并通过 publishEvent 回传给 agentApi
+        if (command.action === 'channel:create' && command.channelCreate?.requestId) {
+          const requestId = command.channelCreate.requestId
+
+          // 一次性监听 CanvasPage 创建完成的回调
+          const onCreated = (ev: Event) => {
+            const detail = (ev as CustomEvent<{ requestId: string; channelId: string; name: string; sceneId: string; error?: string }>).detail
+            if (detail.requestId !== requestId) return
+            window.removeEventListener('agent:channel:created', onCreated)
+
+            this.publishEvent({
+              type: 'syncthink:agent_event',
+              channelId: this.channelId,
+              eventType: 'channel:created',
+              requestId: detail.requestId,
+              newChannelId: detail.channelId,
+              channelName: detail.name,
+              sceneId: detail.sceneId,
+              error: detail.error,
+              agentId: msg.agentId as string | undefined,
+              timestamp: Date.now(),
+            })
+          }
+          window.addEventListener('agent:channel:created', onCreated)
+
+          // 设置超时（10s），防止 CanvasPage 未处理时 agentApi 永远等待
+          setTimeout(() => {
+            window.removeEventListener('agent:channel:created', onCreated)
+            this.publishEvent({
+              type: 'syncthink:agent_event',
+              channelId: this.channelId,
+              eventType: 'channel:created',
+              requestId,
+              error: 'timeout',
+              agentId: msg.agentId as string | undefined,
+              timestamp: Date.now(),
+            })
+          }, 10_000)
+        }
+
         // 派发给 AgentBridge（通过 window CustomEvent）
         // AgentBridge._verifyAndDispatch 在 BroadcastChannel 路径，这里走快捷路径：
         // 直接 dispatch agent:command，跳过签名验证（Phase 1 本地信任）
         window.dispatchEvent(new CustomEvent('agent:command', { detail: command }))
 
         // 推回执行 ack（供 /agent/watch 收到）
+        // channel:create 的真实结果由上方 onCreated 回调推送，此处只推 received ack
         this.publishEvent({
           type: 'syncthink:agent_event',
           channelId: this.channelId,

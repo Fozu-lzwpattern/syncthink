@@ -614,6 +614,54 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         } else {
           console.warn(`[CanvasPage] conversation:append — shape not found or wrong type: ${data.conversationId}`)
         }
+      } else if (cmd.action === 'channel:create' && cmd.channelCreate) {
+        // ── Agent 创建新 Channel（选择场景模式）──────────────────────────
+        const req = cmd.channelCreate
+        const VALID_SCENES = ['free', 'meeting-v1', 'research-v1', 'debate-v1', 'knowledge-map-v1', 'local-services-v1']
+        const sceneId = VALID_SCENES.includes(req.sceneId ?? '') ? (req.sceneId ?? 'free') : 'free'
+
+        try {
+          const newChannel = await createChannel(
+            req.name,
+            sceneId,
+            identity,
+            {
+              accessPolicy: req.accessPolicy ?? 'whitelist',
+              allowedCIDRs: req.allowedCIDRs,
+            }
+          )
+          console.log(`[CanvasPage] agent created channel: ${newChannel.channelId} scene=${sceneId}`)
+
+          // 通知 wsClient 结果（wsClient 监听后回传给 agentApi）
+          window.dispatchEvent(new CustomEvent('agent:channel:created', {
+            detail: {
+              requestId: req.requestId,
+              channelId: newChannel.channelId,
+              name: newChannel.name,
+              sceneId: newChannel.sceneId,
+            },
+          }))
+
+          // Interaction Log
+          await recordInteraction({
+            channelId,
+            actorNodeId: cmd.agentNodeId ?? 'agent',
+            type: 'agent_write',
+            payload: { action: 'channel:create', newChannelId: newChannel.channelId, sceneId },
+          })
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err)
+          console.error('[CanvasPage] agent channel:create failed:', errMsg)
+          window.dispatchEvent(new CustomEvent('agent:channel:created', {
+            detail: {
+              requestId: req.requestId,
+              channelId: '',
+              name: req.name,
+              sceneId,
+              error: errMsg,
+            },
+          }))
+        }
       }
     }
 
