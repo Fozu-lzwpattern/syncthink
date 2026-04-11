@@ -12,7 +12,7 @@ import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldra
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
-import { joinChannel, getChannel, verifyInviteCode, consumeInviteCode } from '../channel/channel'
+import { joinChannel, getChannel, verifyInviteCode, consumeInviteCode, revokeAllInviteCodes } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
 import { agentBridge, type AgentCommand, type ConversationAppendData } from '../agent/server'
@@ -197,6 +197,9 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   // 邀请弹窗
   const [showInvite, setShowInvite] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [inviteIsOwner, setInviteIsOwner] = useState(false)
+  const [revokeConfirm, setRevokeConfirm] = useState(false)
+  const [revoking, setRevoking] = useState(false)
 
   // 卡片类型菜单
   const [showCardMenu, setShowCardMenu] = useState(false)
@@ -475,10 +478,12 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
               body: cardProps.body ?? '',
               tags: cardProps.tags ?? [],
               status: cardProps.status ?? 'open',
-              authorName: cardProps.authorName ?? 'Agent',
+              authorName: cardProps.authorName ?? (cmd.agentNodeId ? `Agent:${cmd.agentNodeId.slice(0, 8)}` : 'Agent'),
+              authorNodeId: cmd.agentNodeId ?? 'agent',
               votes: cardProps.votes ?? 0,
               w: s.w ?? 280,
               h: s.h ?? 160,
+              isAgentCreated: true,
             },
           })
         }
@@ -660,8 +665,12 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   const handleOpenInvite = useCallback(async () => {
     const channel = await getChannel(channelId)
     const policy = channel?.accessPolicy ?? 'whitelist'
+    const isOwner = channel?.ownerNodeId === identity.nodeId
 
-    if (policy === 'whitelist' && channel?.ownerNodeId === identity.nodeId) {
+    setInviteIsOwner(isOwner)
+    setRevokeConfirm(false)
+
+    if (policy === 'whitelist' && isOwner) {
       // 生成带签名的 inviteCode
       const { generateInviteCode } = await import('../channel/channel')
       const encoded = await generateInviteCode(channelId, identity.nodeId)
@@ -675,6 +684,27 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
     setShowInvite(true)
   }, [channelId, identity.nodeId])
+
+  // 吊销全部邀请码（owner only）
+  const handleRevokeAll = useCallback(async () => {
+    if (!revokeConfirm) {
+      setRevokeConfirm(true)
+      return
+    }
+    setRevoking(true)
+    try {
+      await revokeAllInviteCodes(channelId)
+      // 吊销后重新生成新链接（新 token 不受 '*' 影响，因为 '*' 是旧链接吊销标记）
+      const { generateInviteCode } = await import('../channel/channel')
+      const encoded = await generateInviteCode(channelId, identity.nodeId)
+      setInviteUrl(
+        `${window.location.origin}${window.location.pathname}?channel=${channelId}&invite=${encoded}`
+      )
+      setRevokeConfirm(false)
+    } finally {
+      setRevoking(false)
+    }
+  }, [channelId, identity.nodeId, revokeConfirm])
 
   const handleCopyInvite = useCallback(() => {
     navigator.clipboard.writeText(inviteUrl).then(() => {
@@ -831,6 +861,36 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
             <div className="mt-3 text-xs text-gray-600 font-mono">
               Channel ID：{channelId}
             </div>
+            {/* 吊销按钮（owner only） */}
+            {inviteIsOwner && (
+              <div className="mt-4 pt-3 border-t border-st-border">
+                {revokeConfirm ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-amber-400 flex-1">确认吊销？所有旧邀请码将立即失效。</span>
+                    <button
+                      onClick={handleRevokeAll}
+                      disabled={revoking}
+                      className="text-xs px-3 py-1 rounded bg-red-600 hover:bg-red-500 text-white transition-colors disabled:opacity-50"
+                    >
+                      {revoking ? '处理中…' : '确认吊销'}
+                    </button>
+                    <button
+                      onClick={() => setRevokeConfirm(false)}
+                      className="text-xs px-3 py-1 rounded border border-st-border text-gray-400 hover:text-white transition-colors"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleRevokeAll}
+                    className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    🚫 吊销所有旧邀请码
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

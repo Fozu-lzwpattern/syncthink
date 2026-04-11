@@ -39,6 +39,8 @@ export interface SyncThinkCardProps {
   votes: number
   /** 是否展开正文 */
   isExpanded: boolean
+  /** 是否由 Agent 创建（展示 🤖 badge） */
+  isAgentCreated: boolean
 }
 
 export type SyncThinkCardShape = TLBaseShape<'syncthink-card', SyncThinkCardProps>
@@ -77,6 +79,7 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
     tags: T.arrayOf(T.string),
     votes: T.number,
     isExpanded: T.boolean,
+    isAgentCreated: T.boolean,
   }
 
   override getDefaultProps(): SyncThinkCardProps {
@@ -93,11 +96,12 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
       tags: [],
       votes: 0,
       isExpanded: true,
+      isAgentCreated: false,
     }
   }
 
   override component(shape: SyncThinkCardShape) {
-    const { cardType, title, body, authorName, createdAt, status, tags, votes, isExpanded } = shape.props
+    const { cardType, title, body, authorName, createdAt, status, tags, votes, isExpanded, isAgentCreated } = shape.props
     const cfg = TYPE_CONFIG[cardType]
     const statusCfg = STATUS_CONFIG[status]
 
@@ -132,12 +136,17 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
             boxShadow: '0 2px 12px rgba(0,0,0,0.4)',
           }}
         >
-          {/* 左侧颜色竖条 */}
-          <div style={{ width: 4, background: cfg.accent, flexShrink: 0 }} />
+          {/* 左侧颜色竖条（Agent 创建时加发光效果） */}
+          <div style={{
+            width: 4,
+            background: cfg.accent,
+            flexShrink: 0,
+            ...(isAgentCreated ? { boxShadow: `0 0 6px ${cfg.accent}99` } : {}),
+          }} />
 
           {/* 内容区 */}
           <div style={{ flex: 1, padding: '10px 12px', overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {/* 类型标签 + 标题 */}
+            {/* 类型标签 + 标题 + Agent badge */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: 11, color: cfg.accent, fontWeight: 600, letterSpacing: 0.4, flexShrink: 0 }}>
                 {cfg.emoji} {cfg.label.toUpperCase()}
@@ -145,6 +154,22 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
               <span style={{ fontSize: 12, color: '#e2e8f0', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {title}
               </span>
+              {isAgentCreated && (
+                <span
+                  title="由 Agent 创建"
+                  style={{
+                    fontSize: 10,
+                    flexShrink: 0,
+                    background: 'rgba(129,140,248,0.15)',
+                    border: '1px solid rgba(129,140,248,0.4)',
+                    borderRadius: 4,
+                    padding: '1px 4px',
+                    color: '#818cf8',
+                  }}
+                >
+                  🤖
+                </span>
+              )}
             </div>
 
             {/* 正文（展开时显示）*/}

@@ -14,7 +14,7 @@ import {
 } from './types'
 import type { NodeIdentity } from '../identity/types'
 import { nanoid } from './nanoid'
-import { signMessage } from '../identity/nodeIdentity'
+import { signMessage, verifySignature } from '../identity/nodeIdentity'
 
 export async function createChannel(
   name: string,
@@ -28,6 +28,7 @@ export async function createChannel(
   const channelId = nanoid(10)
   const ownerMember: ChannelMember = {
     nodeId: owner.nodeId,
+    publicKey: owner.publicKey,
     displayName: owner.displayName,
     color: owner.avatarColor,
     role: 'owner',
@@ -64,6 +65,7 @@ export async function joinChannel(
 
   const member: ChannelMember = {
     nodeId: identity.nodeId,
+    publicKey: identity.publicKey,
     displayName: identity.displayName,
     color: identity.avatarColor,
     role: 'editor',
@@ -129,7 +131,8 @@ export async function generateInviteCode(
   ownerNodeId: string,
   ttlMs = 24 * 60 * 60 * 1000
 ): Promise<string> {
-  const expiry = Date.now() + ttlMs
+  const issuedAt = Date.now()
+  const expiry = issuedAt + ttlMs
   const oneTimeToken = nanoid(16)
 
   // 签名内容：channelId + ':' + expiry + ':' + oneTimeToken
@@ -140,6 +143,7 @@ export async function generateInviteCode(
     channelId,
     invitedBy: ownerNodeId,
     expiry,
+    issuedAt,
     oneTimeToken,
     signature,
   }
@@ -177,7 +181,7 @@ export async function verifyInviteCode(
   channel: Channel,
   encoded: string,
   incomingPublicKey: string
-): Promise<{ valid: boolean; reason?: 'invalid_invite' | 'invite_expired' | 'invite_used' }> {
+): Promise<{ valid: boolean; reason?: 'invalid_invite' | 'invite_expired' | 'invite_used' | 'invite_revoked' }> {
   const invite = decodeInviteCode(encoded)
   if (!invite) return { valid: false, reason: 'invalid_invite' }
 
@@ -187,28 +191,70 @@ export async function verifyInviteCode(
   // 2. 未过期
   if (invite.expiry < Date.now()) return { valid: false, reason: 'invite_expired' }
 
-  // 3. 未使用过（oneTimeToken 防重放）
+  // 3. 未被主动吊销
+  //    3a. 全量吊销：invite.issuedAt <= channel.revokedBefore
+  if (channel.revokedBefore && invite.issuedAt && invite.issuedAt <= channel.revokedBefore) {
+    return { valid: false, reason: 'invite_revoked' }
+  }
+  //    3b. 单个 token 吊销
+  if (channel.revokedTokens?.includes(invite.oneTimeToken)) {
+    return { valid: false, reason: 'invite_revoked' }
+  }
+
+  // 4. 未使用过（oneTimeToken 防重放）
   if (channel.usedTokens?.includes(invite.oneTimeToken)) {
     return { valid: false, reason: 'invite_used' }
   }
 
-  // 4. 签名验证：用 owner publicKey 验证签名
-  //    我们只存了 ownerNodeId，publicKey 需要从 trustedNodes 或 members 里找
-  //    策略：owner member 的 publicKey 从 identity 获取（owner 自己的 channel 必然知道）
-  //    实际上 invitedBy = ownerNodeId，owner 的 publicKey 在 channel.trustedNodes[0] 是不对的
-  //    正确做法：owner 加入时 trustedNodes 存的是 nodeId（非 publicKey）
-  //    ⚠️ 注意：channel.ts 里 trustedNodes 实际存的是 nodeId 而非 publicKey
-  //    签名验证：这里用 verifyMessage from nodeIdentity
+  // 5. 签名验证：用 owner 的 Ed25519 publicKey 验证邀请码签名
   const ownerMember = channel.members.find(m => m.nodeId === invite.invitedBy)
-  if (!ownerMember) return { valid: false, reason: 'invalid_invite' }
+  if (!ownerMember || !ownerMember.publicKey) return { valid: false, reason: 'invalid_invite' }
 
-  // 签名验证：当前依赖 expiry + oneTimeToken + channelId 三重保护
-  // owner publicKey 未存入 Channel members，完整 Ed25519 验签留 Phase 5
-  // TODO Phase 5: 将 owner publicKey 存入 Channel 结构后启用 verifySignature()
-  void ownerMember
+  // 签名内容与 generateInviteCode 保持一致
+  const payload = `${invite.channelId}:${invite.expiry}:${invite.oneTimeToken}`
+  const sigValid = await verifySignature(payload, invite.signature, ownerMember.publicKey)
+  if (!sigValid) return { valid: false, reason: 'invalid_invite' }
+
+  // incomingPublicKey 备用（未来可做 allow-once per key 扩展）
   void incomingPublicKey
 
   return { valid: true }
+}
+
+/**
+ * 吊销一个邀请码（立即失效，即使未过期）
+ * 只有 Channel owner 应该调用此函数
+ */
+export async function revokeInviteCode(
+  channelId: string,
+  oneTimeToken: string
+): Promise<void> {
+  const channel = await db.get<Channel>(`channel:${channelId}`)
+  if (!channel) throw new Error(`Channel not found: ${channelId}`)
+
+  // 避免重复添加
+  if (channel.revokedTokens?.includes(oneTimeToken)) return
+
+  const updated: Channel = {
+    ...channel,
+    revokedTokens: [...(channel.revokedTokens ?? []), oneTimeToken],
+  }
+  await db.set(`channel:${channelId}`, updated)
+}
+
+/**
+ * 吊销该 Channel 下所有在当前时间之前生成的邀请码
+ * 设置 revokedBefore = Date.now()，之后新生成的邀请码不受影响
+ */
+export async function revokeAllInviteCodes(channelId: string): Promise<void> {
+  const channel = await db.get<Channel>(`channel:${channelId}`)
+  if (!channel) throw new Error(`Channel not found: ${channelId}`)
+
+  const updated: Channel = {
+    ...channel,
+    revokedBefore: Date.now(),
+  }
+  await db.set(`channel:${channelId}`, updated)
 }
 
 /**

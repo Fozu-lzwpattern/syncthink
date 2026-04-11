@@ -46,6 +46,17 @@ export interface Channel {
    * 每次验证通过后将 token 加入此列表，拒绝重复使用
    */
   usedTokens?: string[]
+  /**
+   * 已吊销的 inviteCode oneTimeToken 列表（单个吊销）
+   * owner 主动吊销时加入此列表，立即失效即使未过期
+   */
+  revokedTokens?: string[]
+  /**
+   * 全量吊销时间戳（Unix ms）
+   * 所有 issuedAt <= revokedBefore 的邀请码立即失效
+   * 之后新生成的邀请码（issuedAt > revokedBefore）不受影响
+   */
+  revokedBefore?: number
   metadata?: Record<string, unknown>
 }
 
@@ -64,6 +75,7 @@ export interface InviteCode {
   channelId: string
   invitedBy: string        // owner nodeId
   expiry: number           // Unix ms，默认 now + 24h
+  issuedAt: number         // Unix ms，生成时间（用于全量吊销时比较）
   oneTimeToken: string     // nanoid(16)，防重放
   signature: string        // Ed25519 sign(channelId + expiry + oneTimeToken, ownerPrivKey)
 }
@@ -82,12 +94,14 @@ export interface PeerAdmitMsg {
 export interface PeerRejectMsg {
   type: 'syncthink:peer_reject'
   nodeId: string
-  reason: 'banned' | 'not_trusted' | 'invalid_invite' | 'invite_expired' | 'invite_used'
+  reason: 'banned' | 'not_trusted' | 'invalid_invite' | 'invite_expired' | 'invite_used' | 'invite_revoked'
   timestamp: number
 }
 
 export interface ChannelMember {
   nodeId: string
+  /** Ed25519 公钥 hex（用于 InviteCode 签名验证） */
+  publicKey: string
   displayName: string
   color: string
   role: 'owner' | 'editor' | 'viewer'
