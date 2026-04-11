@@ -12,7 +12,7 @@ import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldra
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
-import { joinChannel, getChannel, verifyInviteCode, consumeInviteCode, revokeAllInviteCodes } from '../channel/channel'
+import { joinChannel, getChannel, createChannel, verifyInviteCode, consumeInviteCode, revokeAllInviteCodes } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
 import { agentBridge, type AgentCommand, type ConversationAppendData } from '../agent/server'
@@ -32,6 +32,9 @@ import { AgentShapeUtil } from '../shapes/AgentShape'
 import { SyncThinkCardShapeUtil, type CardType } from '../shapes/SyncThinkCardShape'
 import { deriveAvatarColor } from '../identity/nodeIdentity'
 import { getSnapshots, rewindToSnapshot, type CanvasSnapshot } from '../sync/snapshots'
+import { db } from '../lib/db'
+import type { DebateStance } from '../scenes/debate/types'
+import { stanceConfig } from '../scenes/debate/types'
 
 const CUSTOM_SHAPE_UTILS = [
   LocalServicesCardShapeUtil,
@@ -212,6 +215,17 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
   // 卡片类型菜单
   const [showCardMenu, setShowCardMenu] = useState(false)
+
+  // ── Debate: stance 声明弹窗 ──────────────────────────────────────────────
+  const [showStanceModal, setShowStanceModal] = useState(false)
+  const [myStance, setMyStance] = useState<DebateStance | null>(null)
+  const [stanceLoading, setStanceLoading] = useState(false)
+
+  // ── rabbit-hole 分裂：子 Channel 跳转弹窗 ────────────────────────────────
+  const [spawnedChannel, setSpawnedChannel] = useState<{
+    channelId: string
+    title: string
+  } | null>(null)
 
   useEffect(() => {
     let destroyed = false
@@ -428,7 +442,18 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     editorRef.current = editor
 
     // 场景初始化
-    getChannel(channelId).then((ch) => {
+    getChannel(channelId).then(async (ch) => {
+      // Debate 场景：检查本地是否已声明 stance，若无则弹出弹窗
+      if (ch?.sceneId === 'debate-v1') {
+        const stanceKey = `debate-stance:${channelId}:${identity.nodeId}`
+        const saved = await db.get<DebateStance>(stanceKey)
+        if (saved) {
+          setMyStance(saved)
+        } else {
+          setShowStanceModal(true)
+        }
+      }
+
       if (ch?.sceneId === 'local-services-v1') {
         initLocalServicesScene(editor)
       } else if (ch?.sceneId === 'meeting-v1') {
@@ -596,45 +621,68 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     return () => window.removeEventListener('agent:command', handleAgentCommand)
   }, [])
 
-  // ---- 增长场景：rabbit-hole 分裂（Research 场景）----
+  // ---- 增长场景：rabbit-hole 分裂（Research 场景）— 真实创建子 Channel ----
   useEffect(() => {
-    const handleSplit = (e: Event) => {
-      const { shapeId, title, expertise } = (e as CustomEvent).detail
+    const handleSplit = async (e: Event) => {
+      const { shapeId, title, expertise } = (e as CustomEvent).detail as {
+        shapeId: string
+        title: string
+        expertise: string[]
+      }
       const ed = editorRef.current
       if (!ed) return
-      // 1. 标记原 rabbit-hole 卡为 hasSpawned
-      const shape = ed.getShape(shapeId)
+
+      const tlShapeId = shapeId as ReturnType<typeof createShapeId>
+      const shape = ed.getShape(tlShapeId)
       if (!shape) return
-      const newChannelId = `research-${Date.now().toString(36)}`
-      ed.updateShape({
-        id: shapeId,
-        type: 'research-card',
-        props: {
-          ...(shape.props as Record<string, unknown>),
-          hasSpawned: true,
-          spawnedChannelId: newChannelId,
-        },
-      })
-      // 2. 在原位置旁边创建跨 Channel 引用锚点
-      ed.createShape({
-        id: createShapeId(),
-        type: 'text',
-        x: shape.x + (shape as { props: { w: number } }).props.w + 20,
-        y: shape.y,
-        props: {
-          text: `→ 子 Channel: ${newChannelId}\n主题: ${title}\n所需: ${(expertise as string[]).join(', ')}`,
-          size: 's',
-          color: 'violet',
-          w: 200,
-        },
-      })
-      // 3. 录 Interaction
-      void recordInteraction({
-        channelId,
-        actorNodeId: identity.nodeId,
-        type: 'agent_write',
-        payload: { subAction: 'rabbit_hole_split', newChannelId, title },
-      })
+
+      try {
+        // 1. 真实创建子 Channel（research-v1 场景，白名单策略）
+        const subChannel = await createChannel(
+          title || '子课题研究',
+          'research-v1',
+          identity,
+          { accessPolicy: 'whitelist' }
+        )
+
+        // 2. 标记原 rabbit-hole 卡为 hasSpawned，写入真实 channelId
+        ed.updateShape({
+          id: tlShapeId,
+          type: 'research-card',
+          props: {
+            ...(shape.props as Record<string, unknown>),
+            hasSpawned: true,
+            spawnedChannelId: subChannel.channelId,
+          },
+        })
+
+        // 3. 在原位置旁边创建跨 Channel 引用锚点
+        ed.createShape({
+          id: createShapeId(),
+          type: 'text',
+          x: shape.x + (shape.props as { w: number }).w + 20,
+          y: shape.y,
+          props: {
+            text: `→ 子 Channel: ${subChannel.channelId}\n主题: ${title}\n所需: ${expertise.join(', ')}`,
+            size: 's',
+            color: 'violet',
+            w: 200,
+          },
+        })
+
+        // 4. 录 Interaction
+        void recordInteraction({
+          channelId,
+          actorNodeId: identity.nodeId,
+          type: 'agent_write',
+          payload: { subAction: 'rabbit_hole_split', newChannelId: subChannel.channelId, title },
+        })
+
+        // 5. 弹出跳转确认弹窗
+        setSpawnedChannel({ channelId: subChannel.channelId, title: title || '子课题研究' })
+      } catch (err) {
+        console.error('[CanvasPage] rabbit-hole split failed:', err)
+      }
     }
     window.addEventListener('research:split-channel', handleSplit)
     return () => window.removeEventListener('research:split-channel', handleSplit)
@@ -1136,6 +1184,129 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
               >
                 确认删除
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Debate: stance 声明弹窗 ─────────────────────────────────────────── */}
+      {showStanceModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div
+            className="bg-st-surface border border-[#6366f166] rounded-xl p-7 w-[420px] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 标题 */}
+            <div className="text-center mb-5">
+              <div className="text-2xl mb-1">⚖️</div>
+              <div className="text-base font-semibold text-white">声明你的立场</div>
+              <div className="text-xs text-gray-400 mt-1">
+                进入观点擂台前，请选择你的初始立场。<br />
+                立场将显示在你发表的每一张卡片上。
+              </div>
+            </div>
+
+            {/* 三个立场按钮 */}
+            <div className="flex flex-col gap-3 mb-5">
+              {(['for', 'against', 'neutral'] as DebateStance[]).map((s) => {
+                const cfg = stanceConfig(s)
+                return (
+                  <button
+                    key={s}
+                    onClick={() => setMyStance(s)}
+                    className={`flex items-center gap-4 px-4 py-3 rounded-xl border transition-all ${
+                      myStance === s
+                        ? 'border-[#6366f1] bg-[#6366f115] shadow-[0_0_12px_#6366f133]'
+                        : 'border-st-border bg-st-bg hover:border-gray-500'
+                    }`}
+                  >
+                    <span style={{ fontSize: 22 }}>{cfg.emoji}</span>
+                    <div className="text-left flex-1">
+                      <div className="text-sm font-medium text-white">{cfg.label}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        {s === 'for' && '支持命题，将从正方视角发表论点'}
+                        {s === 'against' && '反对命题，将从反方视角发表论点'}
+                        {s === 'neutral' && '中立旁观，可自由提供证据或记录共识'}
+                      </div>
+                    </div>
+                    {myStance === s && (
+                      <span style={{ color: cfg.color, fontWeight: 700, fontSize: 16 }}>✓</span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* 提示：立场可以改变 */}
+            <div className="text-xs text-gray-600 text-center mb-4">
+              💡 立场可以在辩论中改变，每次变更都会被记录
+            </div>
+
+            {/* 确认按钮 */}
+            <button
+              disabled={!myStance || stanceLoading}
+              onClick={async () => {
+                if (!myStance) return
+                setStanceLoading(true)
+                try {
+                  await db.set(`debate-stance:${channelId}:${identity.nodeId}`, myStance)
+                  setShowStanceModal(false)
+                } finally {
+                  setStanceLoading(false)
+                }
+              }}
+              className="w-full py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-40 bg-[#6366f1] hover:bg-[#4f52d4] text-white"
+            >
+              {stanceLoading ? '保存中…' : myStance ? `以「${stanceConfig(myStance).label}」立场进入` : '请选择立场'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── rabbit-hole 分裂：子 Channel 跳转弹窗 ────────────────────────────── */}
+      {spawnedChannel && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setSpawnedChannel(null)}
+        >
+          <div
+            className="bg-st-surface border border-[#7c3aed55] rounded-xl p-6 w-[380px] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-center mb-4">
+              <div className="text-2xl mb-1">🐇</div>
+              <div className="text-sm font-semibold text-white">子课题 Channel 已创建</div>
+              <div className="text-xs text-gray-400 mt-1">
+                「{spawnedChannel.title}」已成为独立 Research Channel
+              </div>
+            </div>
+            <div className="bg-st-bg border border-st-border rounded-lg px-3 py-2 mb-4 font-mono text-xs text-gray-400 text-center select-all">
+              {spawnedChannel.channelId}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  const id = spawnedChannel.channelId
+                  setSpawnedChannel(null)
+                  // 在新标签页打开子 Channel，保留当前 Channel 状态
+                  window.open(
+                    `${window.location.origin}${window.location.pathname}?channel=${id}`,
+                    '_blank'
+                  )
+                }}
+                className="flex-1 py-2 bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-sm rounded-lg font-medium transition-colors"
+              >
+                🔗 新标签页进入
+              </button>
+              <button
+                onClick={() => setSpawnedChannel(null)}
+                className="px-4 py-2 text-gray-400 hover:text-white text-sm transition-colors"
+              >
+                留在这里
+              </button>
+            </div>
+            <div className="mt-3 text-xs text-gray-600 text-center">
+              子 Channel 已自动加入到你的 Channel 列表
             </div>
           </div>
         </div>
