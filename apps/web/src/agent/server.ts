@@ -56,18 +56,27 @@ export interface AgentChannelCreateData {
 }
 
 export interface AgentCommand {
-  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append' | 'channel:create'
+  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append' | 'channel:create' | 'chat' | 'distill'
   shape?: AgentShape
   id?: string
   conversationAppend?: ConversationAppendData
   /** channel:create 专用参数 */
   channelCreate?: AgentChannelCreateData
+  /** chat action：消息内容 */
+  message?: string
+  /** distill action：提炼参数 */
+  distill?: {
+    summary: string
+    sourceMessageIds: string[]
+    authorNames?: string[]
+  }
   /** 发出此指令的 Agent nodeId，用于 Interaction Log 记录 */
   agentNodeId?: string
 }
 
 export interface AgentEvent {
   type: 'shape:added' | 'shape:updated' | 'shape:removed' | 'canvas:cleared' | 'auth:rejected' | 'conversation:message_appended'
+    | 'chat:message' | 'chat:distill_request' | 'chat:distilled'
   shapeId?: string
   shape?: AgentShape
   timestamp: number
@@ -77,6 +86,15 @@ export interface AgentEvent {
   /** conversation:message_appended 时携带 */
   conversationId?: string
   messageId?: string
+  /** chat:message 时携带 */
+  authorNodeId?: string
+  authorName?: string
+  content?: string
+  /** chat:distill_request 时携带 */
+  selectedMessageIds?: string[]
+  requestedBy?: string
+  /** chat:distilled 时携带 */
+  cardId?: string
 }
 
 /**

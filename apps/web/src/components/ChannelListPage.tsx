@@ -22,7 +22,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [showJoin, setShowJoin] = useState(false)
   const [newName, setNewName] = useState('')
-  const [newScene, setNewScene] = useState<'free' | 'meeting-v1' | 'research-v1' | 'debate-v1' | 'knowledge-map-v1'>('free')
+  const [newScene, setNewScene] = useState<'free' | 'meeting-v1' | 'research-v1' | 'debate-v1' | 'knowledge-map-v1' | 'chat-v1'>('free')
   const [newAccessPolicy, setNewAccessPolicy] = useState<'whitelist' | 'open' | 'lan-only' | 'cidr'>('whitelist')
   const [newCIDRs, setNewCIDRs] = useState('')
   const [joinId, setJoinId] = useState('')
@@ -234,6 +234,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
             <div className="flex gap-2 mb-3">
               {([
                 { id: 'free',              label: '🎨 自由白板',  desc: '无限画布，自由创作' },
+                { id: 'chat-v1',           label: '💬 聊天室',    desc: '消息流 + AI提炼 → 画布卡片' },
                 { id: 'meeting-v1',        label: '🗓️ 会议讨论',  desc: '结构化议程 + 决策 + 行动项' },
                 { id: 'research-v1',       label: '🔬 共同研究',  desc: '跨领域组队 · rabbit-hole 分裂' },
                 { id: 'debate-v1',         label: '⚖️ 观点擂台',  desc: '正反两方 · 立场声明 · 辩论存档' },
