@@ -309,10 +309,12 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
         }
 
         // 封装成 syncthink:agent_command，广播给 room 内所有浏览器 tab
+        // 注入 agentNodeId 到 command，供浏览器侧 Interaction Log 记录使用
+        const commandWithNodeId = { ...data.command, agentNodeId: nodeId }
         const envelope = JSON.stringify({
           type: 'syncthink:agent_command',
           channelId: data.channelId,
-          command: data.command,
+          command: commandWithNodeId,
           agentId: data.agentId ?? 'external',
           timestamp: Date.now(),
         })

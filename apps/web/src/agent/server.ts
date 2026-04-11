@@ -42,6 +42,8 @@ export interface AgentCommand {
   shape?: AgentShape
   id?: string
   conversationAppend?: ConversationAppendData
+  /** 发出此指令的 Agent nodeId，用于 Interaction Log 记录 */
+  agentNodeId?: string
 }
 
 export interface AgentEvent {
@@ -157,10 +159,11 @@ export class AgentBridge {
       console.log(`[AgentBridge] ✅ command verified — action: ${cmd.payload.action}, nodeId: ${cmd.nodeId.slice(0, 12)}…`)
     }
 
-    // 3. 派发给 CanvasPage 执行
+    // 3. 派发给 CanvasPage 执行（携带 agentNodeId 供 Interaction Log 使用）
     const agentCmd: AgentCommand = {
       action: cmd.payload.action,
       ...cmd.payload.data,
+      agentNodeId: cmd.nodeId,
     }
     window.dispatchEvent(new CustomEvent('agent:command', { detail: agentCmd }))
   }

@@ -483,13 +483,34 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           })
         }
         agentBridge.emit({ type: 'shape:added', shapeId: id, timestamp: Date.now() })
+        // Interaction Log: agent_write (create)
+        await recordInteraction({
+          channelId,
+          actorNodeId: cmd.agentNodeId ?? 'agent',
+          type: 'agent_write',
+          payload: { action: 'create', shapeId: id, shapeType: cmd.shape?.type },
+        })
       } else if (cmd.action === 'delete' && cmd.id) {
         ed.deleteShapes([cmd.id as ReturnType<typeof createShapeId>])
         agentBridge.emit({ type: 'shape:removed', shapeId: cmd.id, timestamp: Date.now() })
+        // Interaction Log: agent_write (delete)
+        await recordInteraction({
+          channelId,
+          actorNodeId: cmd.agentNodeId ?? 'agent',
+          type: 'agent_write',
+          payload: { action: 'delete', shapeId: cmd.id },
+        })
       } else if (cmd.action === 'clear') {
         ed.selectAll()
         ed.deleteShapes(ed.getSelectedShapeIds())
         agentBridge.emit({ type: 'canvas:cleared', timestamp: Date.now() })
+        // Interaction Log: agent_write (clear)
+        await recordInteraction({
+          channelId,
+          actorNodeId: cmd.agentNodeId ?? 'agent',
+          type: 'agent_write',
+          payload: { action: 'clear' },
+        })
       } else if (cmd.action === 'conversation:append' && cmd.conversationAppend) {
         const data = cmd.conversationAppend as ConversationAppendData
         const shapeId = data.conversationId as ReturnType<typeof createShapeId>
@@ -894,6 +915,13 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
                 onClick={() => {
                   pendingDelete.confirm()
                   setPendingDelete(null)
+                  // Interaction Log: card_deleted（软删除确认）
+                  recordInteraction({
+                    channelId,
+                    actorNodeId: identity.nodeId,
+                    type: 'card_deleted',
+                    payload: { count: pendingDelete.shapeIds?.length ?? 1 },
+                  })
                 }}
                 className="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
               >
