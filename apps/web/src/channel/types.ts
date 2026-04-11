@@ -20,13 +20,21 @@ export interface Channel {
    * 访问控制策略
    * - 'whitelist'（默认）：只有 trustedNodes 中的 publicKey 才能加入
    * - 'open'：任意节点可加入（需配合 bannedNodes 黑名单）
+   * - 'lan-only'：只允许 RFC1918 局域网 IP 的节点加入（信令服务器检测源 IP）
+   * - 'cidr'：自定义 IP 段白名单，配合 allowedCIDRs 使用
    */
-  accessPolicy?: 'whitelist' | 'open'
+  accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
   /**
    * 白名单：允许加入的节点 publicKey 列表（Ed25519 hex）
    * accessPolicy='whitelist' 时生效，不在列表内的节点握手被拒绝
    */
   trustedNodes?: string[]
+  /**
+   * IP 段白名单：允许加入的 CIDR 列表
+   * accessPolicy='cidr' 时生效，例如：['10.0.0.0/8', '192.168.1.0/24']
+   * 信令服务器以 WS 握手时的 socket.remoteAddress 为准（不可伪造）
+   */
+  allowedCIDRs?: string[]
   /**
    * 黑名单：禁止加入的节点 publicKey 列表（Ed25519 hex）
    * 预留字段，Phase 4+ 开放 Channel 场景实现

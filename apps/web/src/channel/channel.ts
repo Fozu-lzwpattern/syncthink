@@ -17,7 +17,11 @@ import { nanoid } from './nanoid'
 export async function createChannel(
   name: string,
   sceneId: string,
-  owner: NodeIdentity
+  owner: NodeIdentity,
+  policyOptions?: {
+    accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+    allowedCIDRs?: string[]
+  }
 ): Promise<Channel> {
   const channelId = nanoid(10)
   const ownerMember: ChannelMember = {
@@ -38,6 +42,12 @@ export async function createChannel(
     createdAt: Date.now(),
     members: [ownerMember],
     sceneId,
+    // 访问策略（默认 whitelist，owner 的 publicKey 自动加入）
+    accessPolicy: policyOptions?.accessPolicy ?? 'whitelist',
+    trustedNodes: policyOptions?.accessPolicy === 'whitelist' || !policyOptions?.accessPolicy
+      ? [owner.nodeId]   // whitelist 默认只有创建者，加入时再扩展
+      : undefined,
+    allowedCIDRs: policyOptions?.allowedCIDRs,
   }
 
   await db.set(`channel:${channelId}`, channel)

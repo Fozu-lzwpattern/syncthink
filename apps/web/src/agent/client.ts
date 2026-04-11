@@ -177,14 +177,30 @@ export class AgentClient {
    * @param signalingWs  已连接的信令 WebSocket
    * @param roomId       要加入的 room（= channelId）
    */
-  async joinChannel(signalingWs: WebSocket, roomId: string): Promise<void> {
+  /**
+   * 向信令服务器发送握手包，宣告身份并（可选）携带 Channel 访问策略
+   *
+   * @param signalingWs    已连接的信令 WebSocket
+   * @param roomId         要加入的 room（= channelId）
+   * @param policyOptions  可选：Channel 创建者首次加入时携带策略，服务器缓存后对后续节点执行
+   *                       - accessPolicy: 'lan-only' | 'cidr' | 'open' | 'whitelist'
+   *                       - allowedCIDRs: ['10.0.0.0/8', '192.168.1.0/24']（cidr 策略时必填）
+   */
+  async joinChannel(
+    signalingWs: WebSocket,
+    roomId: string,
+    policyOptions?: {
+      accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+      allowedCIDRs?: string[]
+    }
+  ): Promise<void> {
     const timestamp = Date.now()
     const message = `${this.nodeId}:${roomId}:${timestamp}`
     const msgBytes = new TextEncoder().encode(message)
     const sigBytes = await ed.signAsync(msgBytes, this.privateKey)
     const signature = hex(sigBytes)
 
-    const handshake = {
+    const handshake: Record<string, unknown> = {
       type: 'syncthink:join',
       nodeId: this.nodeId,
       publicKey: this.publicKey,
@@ -193,8 +209,19 @@ export class AgentClient {
       signature,
     }
 
+    // 携带访问策略（Channel 创建者首次加入时）
+    if (policyOptions?.accessPolicy) {
+      handshake.accessPolicy = policyOptions.accessPolicy
+      if (policyOptions.allowedCIDRs) {
+        handshake.allowedCIDRs = policyOptions.allowedCIDRs
+      }
+    }
+
     signalingWs.send(JSON.stringify(handshake))
-    console.log(`[AgentClient] join handshake sent: room=${roomId}, nodeId=${this.nodeId.slice(0, 12)}…`)
+    const policyLabel = policyOptions?.accessPolicy
+      ? ` policy=${policyOptions.accessPolicy}`
+      : ''
+    console.log(`[AgentClient] join handshake sent: room=${roomId}, nodeId=${this.nodeId.slice(0, 12)}…${policyLabel}`)
   }
 
   destroy() {

@@ -23,9 +23,12 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
   const [showJoin, setShowJoin] = useState(false)
   const [newName, setNewName] = useState('')
   const [newScene, setNewScene] = useState<'free' | 'meeting-v1'>('free')
+  const [newAccessPolicy, setNewAccessPolicy] = useState<'whitelist' | 'open' | 'lan-only' | 'cidr'>('whitelist')
+  const [newCIDRs, setNewCIDRs] = useState('')
   const [joinId, setJoinId] = useState('')
   const [loading, setLoading] = useState(false)
   const [newChannelId, setNewChannelId] = useState<string | null>(null)
+  const [newChannelPolicy, setNewChannelPolicy] = useState<{ accessPolicy: string; allowedCIDRs?: string[] } | null>(null)
   const [copied, setCopied] = useState(false)
 
   const loadChannels = useCallback(async () => {
@@ -63,16 +66,28 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
     if (!newName.trim()) return
     setLoading(true)
     try {
-      const ch = await createChannel(newName.trim(), newScene, identity)
+      // 解析 CIDR 列表（逗号或换行分隔）
+      const parsedCIDRs = newAccessPolicy === 'cidr'
+        ? newCIDRs.split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+        : undefined
+
+      const ch = await createChannel(newName.trim(), newScene, identity, {
+        accessPolicy: newAccessPolicy,
+        allowedCIDRs: parsedCIDRs,
+      })
       await recordInteraction({
         channelId: ch.channelId,
         actorNodeId: identity.nodeId,
         type: 'channel_created',
-        payload: { name: ch.name },
+        payload: { name: ch.name, accessPolicy: newAccessPolicy },
       })
       setShowCreate(false)
       setNewName('')
       setNewScene('free')
+      setNewAccessPolicy('whitelist')
+      setNewCIDRs('')
+      // 保存策略供邀请弹窗展示
+      setNewChannelPolicy({ accessPolicy: newAccessPolicy, allowedCIDRs: parsedCIDRs })
       // 先显示邀请弹窗，不直接跳转
       setNewChannelId(ch.channelId)
       await loadChannels()
@@ -124,6 +139,24 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-sm font-semibold text-white mb-1">Channel 已创建 ✓</div>
+            {newChannelPolicy && (
+              <div className="flex items-center gap-2 mb-2">
+                <span className={`text-[10px] px-2 py-0.5 rounded border font-mono ${
+                  newChannelPolicy.accessPolicy === 'lan-only'
+                    ? 'bg-green-900/30 text-green-400 border-green-700'
+                    : newChannelPolicy.accessPolicy === 'open'
+                    ? 'bg-orange-900/30 text-orange-400 border-orange-700'
+                    : newChannelPolicy.accessPolicy === 'cidr'
+                    ? 'bg-blue-900/30 text-blue-400 border-blue-700'
+                    : 'bg-gray-800 text-gray-400 border-gray-600'
+                }`}>
+                  {newChannelPolicy.accessPolicy === 'lan-only' && '🏠 局域网限制'}
+                  {newChannelPolicy.accessPolicy === 'open' && '🌐 开放访问'}
+                  {newChannelPolicy.accessPolicy === 'cidr' && `🎯 IP段: ${newChannelPolicy.allowedCIDRs?.join(', ')}`}
+                  {newChannelPolicy.accessPolicy === 'whitelist' && '🔒 白名单'}
+                </span>
+              </div>
+            )}
             <div className="text-xs text-gray-400 mb-4">分享邀请链接，或直接进入开始协作：</div>
             <div className="flex gap-2 mb-4">
               <input
@@ -217,6 +250,41 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
                 </button>
               ))}
             </div>
+            {/* 访问策略选择 */}
+            <div className="mb-3">
+              <div className="text-xs text-gray-500 mb-2">访问策略</div>
+              <div className="grid grid-cols-2 gap-2">
+                {([
+                  { id: 'whitelist', label: '🔒 白名单', desc: '仅受邀节点可加入' },
+                  { id: 'open',      label: '🌐 开放',   desc: '任意节点可加入' },
+                  { id: 'lan-only',  label: '🏠 局域网', desc: '仅同一局域网（RFC1918）' },
+                  { id: 'cidr',      label: '🎯 IP 段',  desc: '自定义 CIDR 白名单' },
+                ] as const).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setNewAccessPolicy(p.id)}
+                    className={`p-2 rounded-lg border text-left transition-colors ${
+                      newAccessPolicy === p.id
+                        ? 'border-st-indigo bg-st-indigo/10'
+                        : 'border-st-border bg-st-bg hover:border-gray-500'
+                    }`}
+                  >
+                    <div className="text-xs font-medium text-white">{p.label}</div>
+                    <div className="text-[10px] text-gray-500 mt-0.5">{p.desc}</div>
+                  </button>
+                ))}
+              </div>
+              {newAccessPolicy === 'cidr' && (
+                <textarea
+                  value={newCIDRs}
+                  onChange={(e) => setNewCIDRs(e.target.value)}
+                  placeholder={'10.0.0.0/8\n192.168.1.0/24'}
+                  rows={2}
+                  className="mt-2 w-full px-3 py-2 bg-st-bg border border-st-border rounded-lg text-xs font-mono outline-none focus:border-st-indigo text-gray-300 resize-none"
+                />
+              )}
+            </div>
             <div className="flex gap-2">
               <input
                 autoFocus
@@ -228,7 +296,7 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
               />
               <button
                 onClick={handleCreate}
-                disabled={loading || !newName.trim()}
+                disabled={loading || !newName.trim() || (newAccessPolicy === 'cidr' && !newCIDRs.trim())}
                 className="px-4 py-2 bg-st-indigo disabled:opacity-50 rounded-lg text-sm font-medium"
               >
                 {loading ? '…' : '创建'}
@@ -303,8 +371,19 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-gray-500 mt-1 font-mono">
+                      <div className="text-xs text-gray-500 mt-1 font-mono flex items-center gap-2">
                         {ch.channelId}
+                        {ch.accessPolicy && ch.accessPolicy !== 'whitelist' && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded border ${
+                            ch.accessPolicy === 'lan-only'
+                              ? 'bg-green-900/30 text-green-400 border-green-800'
+                              : ch.accessPolicy === 'open'
+                              ? 'bg-orange-900/30 text-orange-400 border-orange-800'
+                              : 'bg-blue-900/30 text-blue-400 border-blue-800'
+                          }`}>
+                            {ch.accessPolicy === 'lan-only' ? '🏠 LAN' : ch.accessPolicy === 'open' ? '🌐 open' : '🎯 CIDR'}
+                          </span>
+                        )}
                       </div>
                       {isBuiltIn && (
                         <div className="text-xs text-gray-500 mt-1">

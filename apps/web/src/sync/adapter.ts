@@ -1,5 +1,5 @@
 /**
- * SyncThink CRDT Adapter (Phase 3)
+ * SyncThink CRDT Adapter (Phase 4)
  * tldraw v2 store ↔ Yjs Y.Map 双向绑定
  *
  * 架构：
@@ -13,6 +13,11 @@
  * - bannedPeers  黑名单：预留接口，后续 open Channel 场景使用
  * - 信令握手：连接建立后自动发送 syncthink:join 握手包（如提供 AgentClient）
  *
+ * Phase 4 新增（方案B + 方案C）：
+ * - 软删除拦截：本地单次删除 >= SOFT_DELETE_THRESHOLD 时，不立即写 Yjs delete，
+ *   而是广播 pendingDelete 标记，等待 onPendingDelete 回调确认后再真正删除。
+ * - 快照管理器：每 60s / 每 10 次操作自动打一次 Yjs 状态快照，存 IndexedDB。
+ *
  * 多人同步通过 y-webrtc 自动完成，adapter 只负责本地绑定
  */
 import * as Y from 'yjs'
@@ -24,12 +29,26 @@ import {
   type TLRecord,
   type TLStore,
 } from '@tldraw/tldraw'
+import { createSnapshotManager, type SnapshotManager } from './snapshots'
+
+/** 单次删除超过此数量 → 触发软删除确认流程 */
+const SOFT_DELETE_THRESHOLD = 5
+
+export interface PendingDeleteEvent {
+  /** 被标记为待删除的 shape IDs */
+  shapeIds: string[]
+  /** 确认：真正执行删除并广播 */
+  confirm: () => void
+  /** 取消：恢复 shape，不删除 */
+  cancel: () => void
+}
 
 export interface SyncAdapter {
   store: TLStore
   ydoc: Y.Doc
   provider: WebrtcProvider | null
   persistence: IndexeddbPersistence
+  snapshots: SnapshotManager
   destroy: () => void
   getConnectedPeers: () => number
   /** P3: 动态加入信任对等方（publicKey hex） */
@@ -55,6 +74,13 @@ export interface SyncAdapterOptions {
    * 来自 Channel.bannedNodes
    */
   bannedPeers?: string[]
+  /**
+   * P4: 软删除确认回调
+   * 当本地用户一次性删除 >= SOFT_DELETE_THRESHOLD 个 shape 时触发。
+   * 回调需要展示确认 UI，用户确认后调用 event.confirm()，取消则调用 event.cancel()。
+   * 若未提供此回调，则所有删除直接执行（兼容旧行为）。
+   */
+  onPendingDelete?: (event: PendingDeleteEvent) => void
 }
 
 export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
@@ -64,6 +90,7 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
     enableWebrtc = true,
     trustedPeers,
     bannedPeers,
+    onPendingDelete,
   } = options
 
   // P3: 访问控制集合
@@ -84,11 +111,81 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
   // 3. 防循环 flag
   let isApplyingRemote = false
 
+  // P4: 软删除暂存——保存被拦截的 records 以便取消时恢复
+  let pendingDeleteRecords: TLRecord[] | null = null
+
   // 4. tldraw → Yjs（本地操作同步到 CRDT）
   const unlistenStore = store.listen(
     ({ changes }) => {
       if (isApplyingRemote) return
 
+      const removed = Object.values(changes.removed)
+
+      // P4: 软删除拦截
+      // 仅当提供了 onPendingDelete 回调，且删除数量达到阈值时触发
+      if (
+        onPendingDelete &&
+        removed.length >= SOFT_DELETE_THRESHOLD &&
+        pendingDeleteRecords === null
+      ) {
+        // 暂存被删除的 records（store 内已删，但 Yjs 还没同步）
+        pendingDeleteRecords = removed
+
+        const shapeIds = removed.map((r) => r.id)
+
+        onPendingDelete({
+          shapeIds,
+          confirm: () => {
+            // 用户确认：真正写入 Yjs delete，广播给所有 peer
+            ydoc.transact(() => {
+              for (const record of pendingDeleteRecords ?? []) {
+                yRecords.delete(record.id)
+              }
+              // 新增/更新依旧写入
+              for (const record of Object.values(changes.added)) {
+                yRecords.set(record.id, record)
+              }
+              for (const [, [, after]] of Object.entries(changes.updated)) {
+                yRecords.set(after.id, after)
+              }
+            }, 'local')
+            pendingDeleteRecords = null
+            snapshots.notifyOp()
+          },
+          cancel: () => {
+            // 用户取消：把 shape 恢复回 store（不写 Yjs，不广播）
+            if (pendingDeleteRecords) {
+              isApplyingRemote = true
+              try {
+                store.mergeRemoteChanges(() => {
+                  store.put(pendingDeleteRecords as TLRecord[])
+                })
+              } finally {
+                isApplyingRemote = false
+              }
+            }
+            pendingDeleteRecords = null
+          },
+        })
+
+        // 本次 listen 只处理软删除的拦截；新增/更新仍然正常写入（单独 transact）
+        if (
+          Object.keys(changes.added).length > 0 ||
+          Object.keys(changes.updated).length > 0
+        ) {
+          ydoc.transact(() => {
+            for (const record of Object.values(changes.added)) {
+              yRecords.set(record.id, record)
+            }
+            for (const [, [, after]] of Object.entries(changes.updated)) {
+              yRecords.set(after.id, after)
+            }
+          }, 'local')
+        }
+        return
+      }
+
+      // 正常路径：直接同步所有变更到 Yjs
       ydoc.transact(() => {
         // 新增/更新
         for (const record of Object.values(changes.added)) {
@@ -98,10 +195,12 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
           yRecords.set(after.id, after)
         }
         // 删除
-        for (const record of Object.values(changes.removed)) {
+        for (const record of removed) {
           yRecords.delete(record.id)
         }
       }, 'local')
+
+      snapshots.notifyOp()
     },
     { scope: 'document', source: 'user' }
   )
@@ -152,6 +251,8 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
     } finally {
       isApplyingRemote = false
     }
+
+    snapshots.notifyOp()
   })
 
   // 6. 本地持久化
@@ -168,13 +269,21 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
     })
   }
 
+  // 8. P4: 快照管理器（初始先打一张，persistence 加载后再打一张）
+  const snapshots = createSnapshotManager(channelId, ydoc)
+  persistence.whenSynced.then(() => {
+    snapshots.flush().catch(console.error)
+  })
+
   return {
     store,
     ydoc,
     provider,
     persistence,
+    snapshots,
     destroy() {
       unlistenStore()
+      snapshots.destroy()
       provider?.destroy()
       persistence.destroy()
       ydoc.destroy()

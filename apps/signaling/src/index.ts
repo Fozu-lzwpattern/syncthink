@@ -53,6 +53,9 @@ interface HandshakePayload {
   roomId: string
   timestamp: number
   signature: string
+  /** 可选：Channel 创建者首次加入时携带，信令服务器缓存并对后续加入者执行 */
+  accessPolicy?: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+  allowedCIDRs?: string[]
 }
 
 type IncomingMsg = YjsSignalingMsg | HandshakePayload
@@ -65,6 +68,82 @@ function log(...args: unknown[]) {
 
 function warn(...args: unknown[]) {
   console.warn(`[signaling] ⚠️`, ...args)
+}
+
+// ─── IP 访问控制 ─────────────────────────────────────────────────────────────
+
+/**
+ * 判断 IP 是否为 RFC1918 私有地址（局域网）
+ * 包括：10.x.x.x / 172.16-31.x.x / 192.168.x.x / 127.x.x.x / ::1
+ */
+function isPrivateIP(ip: string): boolean {
+  // 去掉 IPv6 映射前缀 ::ffff:
+  const addr = ip.replace(/^::ffff:/, '')
+  if (addr === '::1' || addr === 'localhost') return true
+  return (
+    /^10\./.test(addr) ||
+    /^172\.(1[6-9]|2\d|30|31)\./.test(addr) ||
+    /^192\.168\./.test(addr) ||
+    /^127\./.test(addr)
+  )
+}
+
+/**
+ * CIDR 匹配（IPv4）
+ * 例：cidrMatch('192.168.1.50', '192.168.1.0/24') => true
+ */
+function cidrMatch(ip: string, cidr: string): boolean {
+  const addr = ip.replace(/^::ffff:/, '')
+  const [range, bitsStr] = cidr.split('/')
+  const bits = parseInt(bitsStr ?? '32', 10)
+  const ipNum = ipToNum(addr)
+  const rangeNum = ipToNum(range)
+  if (ipNum === null || rangeNum === null) return false
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0
+  return (ipNum & mask) === (rangeNum & mask)
+}
+
+function ipToNum(ip: string): number | null {
+  const parts = ip.split('.').map(Number)
+  if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return null
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0
+}
+
+/**
+ * Channel 网络访问策略检查
+ * 信令服务器在握手时检查 socket.remoteAddress（不可被客户端伪造）
+ *
+ * @param remoteIp  WS 连接的源 IP（req.socket.remoteAddress）
+ * @param policy    Channel 的 accessPolicy
+ * @param allowedCIDRs  CIDR 白名单（accessPolicy='cidr' 时使用）
+ * @returns { allowed: boolean; reason?: string }
+ */
+function checkNetworkPolicy(
+  remoteIp: string,
+  policy: 'whitelist' | 'open' | 'lan-only' | 'cidr' | undefined,
+  allowedCIDRs?: string[]
+): { allowed: boolean; reason?: string } {
+  if (!policy || policy === 'whitelist' || policy === 'open') {
+    // whitelist 由 trustedNodes 在 AgentBridge 侧校验，信令层不干预
+    // open 直接放行
+    return { allowed: true }
+  }
+
+  if (policy === 'lan-only') {
+    if (isPrivateIP(remoteIp)) return { allowed: true }
+    return { allowed: false, reason: `lan-only: remote IP ${remoteIp} is not private` }
+  }
+
+  if (policy === 'cidr') {
+    if (!allowedCIDRs || allowedCIDRs.length === 0) {
+      return { allowed: false, reason: 'cidr policy requires allowedCIDRs' }
+    }
+    const matched = allowedCIDRs.some((cidr) => cidrMatch(remoteIp, cidr))
+    if (matched) return { allowed: true }
+    return { allowed: false, reason: `cidr: remote IP ${remoteIp} not in allowedCIDRs [${allowedCIDRs.join(', ')}]` }
+  }
+
+  return { allowed: true }
 }
 
 async function verifyHandshake(h: HandshakePayload): Promise<{ ok: boolean; reason?: string }> {
@@ -116,6 +195,17 @@ function hexToBytes(hex: string): Uint8Array {
 const rooms = new Map<string, Set<WebSocket.WebSocket>>()
 const auditLog = new Map<string, { roomId: string; joinedAt: number; publicKey: string }>()
 
+/**
+ * Channel 网络策略注册表
+ * key = roomId，value = { accessPolicy, allowedCIDRs? }
+ * Channel 创建者首次发送 syncthink:join 时附带策略，信令服务器缓存到此 map
+ * 后续所有加入该 room 的节点都受此策略约束
+ */
+const roomPolicies = new Map<string, {
+  accessPolicy: 'whitelist' | 'open' | 'lan-only' | 'cidr'
+  allowedCIDRs?: string[]
+}>()
+
 /** Agent API 服务器引用（用于 agent_event 转发） */
 let agentApiServer: ReturnType<typeof startAgentApi> | null = null
 
@@ -138,14 +228,15 @@ async function main() {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
       service: 'syncthink-signaling',
-      version: '0.3.0',
-      phase: 3,
+      version: '0.5.0',
+      phase: '3+network-policy',
       protocol,
       tls_source: tlsConfig?.source ?? null,
       auth_required: AUTH_REQUIRED,
       rooms: rooms.size,
       peers: totalPeers,
       audit_entries: auditLog.size,
+      room_policies: Object.fromEntries(roomPolicies),
     }))
   })
 
@@ -167,10 +258,11 @@ async function main() {
       }
       if (!msg) return
 
-      // ── syncthink:join — 握手包验签 ──────────────────────────────────
+      // ── syncthink:join — 握手包验签 + 网络策略检查 ───────────────────
       if (msg.type === 'syncthink:join') {
         const handshake = msg as HandshakePayload
 
+        // ① Ed25519 签名验证（AUTH_REQUIRED=true 时强制）
         if (AUTH_REQUIRED) {
           const result = await verifyHandshake(handshake)
           if (!result.ok) {
@@ -178,6 +270,33 @@ async function main() {
             ws.send(JSON.stringify({
               type: 'syncthink:join_rejected',
               reason: result.reason,
+              timestamp: Date.now(),
+            }))
+            return
+          }
+        }
+
+        // ② 注册 / 读取 room 网络访问策略
+        // 首次创建者携带 accessPolicy → 存入 roomPolicies
+        if (handshake.accessPolicy && !roomPolicies.has(handshake.roomId)) {
+          roomPolicies.set(handshake.roomId, {
+            accessPolicy: handshake.accessPolicy,
+            allowedCIDRs: handshake.allowedCIDRs,
+          })
+          log(`room policy set — room: ${handshake.roomId} policy: ${handshake.accessPolicy}${
+            handshake.allowedCIDRs ? ` CIDRs: [${handshake.allowedCIDRs.join(', ')}]` : ''
+          }`)
+        }
+
+        // ③ 网络访问策略检查（基于 socket.remoteAddress，不可被客户端伪造）
+        const roomPolicy = roomPolicies.get(handshake.roomId)
+        if (roomPolicy) {
+          const ipCheck = checkNetworkPolicy(remoteIp, roomPolicy.accessPolicy, roomPolicy.allowedCIDRs)
+          if (!ipCheck.allowed) {
+            warn(`network policy rejected — nodeId: ${handshake.nodeId?.slice(0, 12)}… reason: ${ipCheck.reason}`)
+            ws.send(JSON.stringify({
+              type: 'syncthink:join_rejected',
+              reason: ipCheck.reason ?? 'network_policy_denied',
               timestamp: Date.now(),
             }))
             return
@@ -280,7 +399,7 @@ async function main() {
   server.listen(PORT, HOST, () => {
     console.log('')
     console.log(`  ╔═══════════════════════════════════════╗`)
-    console.log(`  ║  ⟁  SyncThink Signaling  v0.4.0     ║`)
+    console.log(`  ║  ⟁  SyncThink Signaling  v0.5.0     ║`)
     console.log(`  ╚═══════════════════════════════════════╝`)
     console.log('')
     console.log(`  ${protocol.toUpperCase()} ✅  ${protocol}://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)

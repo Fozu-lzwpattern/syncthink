@@ -4,12 +4,14 @@
  * - 渲染 tldraw 画布
  * - 顶部状态栏：Channel ID、在线人数、返回按钮
  * - Phase 2：ConversationNode / AgentNode 创建按钮 + Review 模式
+ * - Phase 4：软删除确认弹窗（方案B）+ 快照 rewind Review（方案C）
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Tldraw, type Editor, createShapeId } from '@tldraw/tldraw'
+import * as Y from 'yjs'
+import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldraw'
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
-import { createSyncAdapter, type SyncAdapter } from '../sync/adapter'
+import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
 import { joinChannel, getChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
 import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
@@ -23,6 +25,7 @@ import { ConversationShapeUtil } from '../shapes/ConversationShape'
 import { AgentShapeUtil } from '../shapes/AgentShape'
 import { SyncThinkCardShapeUtil, type CardType } from '../shapes/SyncThinkCardShape'
 import { deriveAvatarColor } from '../identity/nodeIdentity'
+import { getSnapshots, rewindToSnapshot, type CanvasSnapshot } from '../sync/snapshots'
 
 const CUSTOM_SHAPE_UTILS = [
   LocalServicesCardShapeUtil,
@@ -46,61 +49,110 @@ function relTime(ts: number): string {
   return `${Math.floor(diff / 86_400_000)}d前`
 }
 
-// ---- Review 时间轴组件 ----
+// ---- Review 时间轴组件（方案C：快照 Rewind）----
 interface ReviewTimelineProps {
+  snapshots: CanvasSnapshot[]
   interactions: InteractionRecord[]
+  /** 拖动滑块时，把 rewind 到对应快照的 ydoc 传出去 */
+  onRewind: (ydoc: Y.Doc | null) => void
 }
 
-function ReviewTimeline({ interactions }: ReviewTimelineProps) {
-  const sorted = [...interactions].sort((a, b) => a.timestamp - b.timestamp)
-  const earliest = sorted[0]?.timestamp ?? Date.now()
-  const latest = sorted[sorted.length - 1]?.timestamp ?? Date.now()
-  const [sliderValue, setSliderValue] = useState(latest)
+function ReviewTimeline({ snapshots, interactions, onRewind }: ReviewTimelineProps) {
+  const sortedSnaps = [...snapshots].sort((a, b) => a.timestamp - b.timestamp)
+  const sortedEvents = [...interactions].sort((a, b) => a.timestamp - b.timestamp)
 
-  const filteredEvents = sorted
-    .filter((r) => r.timestamp <= sliderValue)
-    .slice(-5)
-    .reverse()
+  const earliest = sortedSnaps[0]?.timestamp ?? sortedEvents[0]?.timestamp ?? Date.now()
+  const latest =
+    sortedSnaps[sortedSnaps.length - 1]?.timestamp ??
+    sortedEvents[sortedEvents.length - 1]?.timestamp ??
+    Date.now()
+
+  const [sliderValue, setSliderValue] = useState(latest)
+  const [isRewinding, setIsRewinding] = useState(false)
 
   const formatTs = (ts: number) =>
     new Date(ts).toLocaleTimeString('zh-CN', {
       hour: '2-digit',
       minute: '2-digit',
+      second: '2-digit',
     })
+
+  const handleSliderChange = useCallback(
+    async (value: number) => {
+      setSliderValue(value)
+      if (sortedSnaps.length === 0) {
+        onRewind(null)
+        return
+      }
+      setIsRewinding(true)
+      try {
+        const channelId = sortedSnaps[0]?.channelId ?? ''
+        const rewound = await rewindToSnapshot(channelId, value)
+        onRewind(rewound)
+      } finally {
+        setIsRewinding(false)
+      }
+    },
+    [sortedSnaps, onRewind]
+  )
+
+  // 当前时间点附近的事件（±30s 内）
+  const nearbyEvents = sortedEvents
+    .filter((r) => Math.abs(r.timestamp - sliderValue) <= 30_000)
+    .slice(-5)
+    .reverse()
+
+  const snapMarkers = sortedSnaps.map((s) => ({
+    pct: latest === earliest ? 0 : ((s.timestamp - earliest) / (latest - earliest)) * 100,
+    ts: s.timestamp,
+  }))
 
   return (
     <div
       className="shrink-0 border-t border-st-border bg-st-surface px-4 py-2"
       style={{ zIndex: 10 }}
     >
-      {/* 时间轴滑块 */}
-      <div className="flex items-center gap-3 mb-2">
-        <span className="text-xs text-gray-500 whitespace-nowrap font-mono">
+      {/* 快照标记 + 滑块 */}
+      <div className="relative flex items-center gap-3 mb-2">
+        <span className="text-xs text-gray-500 whitespace-nowrap font-mono shrink-0">
           {formatTs(earliest)}
         </span>
-        <input
-          type="range"
-          className="flex-1 accent-cyan-400"
-          min={earliest}
-          max={latest === earliest ? earliest + 1 : latest}
-          value={sliderValue}
-          step={1}
-          onChange={(e) => setSliderValue(Number(e.target.value))}
-        />
-        <span className="text-xs text-gray-500 whitespace-nowrap font-mono">
+        <div className="relative flex-1">
+          {/* 快照刻度点 */}
+          {snapMarkers.map((m) => (
+            <div
+              key={m.ts}
+              title={`快照 @ ${formatTs(m.ts)}`}
+              className="absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-70 pointer-events-none"
+              style={{ left: `${m.pct}%` }}
+            />
+          ))}
+          <input
+            type="range"
+            className="w-full accent-cyan-400"
+            min={earliest}
+            max={latest === earliest ? earliest + 1 : latest}
+            value={sliderValue}
+            step={1}
+            onChange={(e) => handleSliderChange(Number(e.target.value))}
+          />
+        </div>
+        <span className="text-xs text-gray-500 whitespace-nowrap font-mono shrink-0">
           {formatTs(latest)}
         </span>
-        <span className="text-xs text-st-cyan font-mono whitespace-nowrap">
-          @ {formatTs(sliderValue)}
+        <span className="text-xs text-st-cyan font-mono whitespace-nowrap shrink-0">
+          {isRewinding ? '⏳ 回放中…' : `@ ${formatTs(sliderValue)}`}
         </span>
       </div>
 
-      {/* 事件列表 */}
+      {/* 周边事件列表 */}
       <div className="flex gap-2 overflow-x-auto pb-1">
-        {filteredEvents.length === 0 ? (
-          <span className="text-xs text-gray-600">此时间点前暂无事件</span>
+        {nearbyEvents.length === 0 ? (
+          <span className="text-xs text-gray-600">
+            {sortedSnaps.length === 0 ? '暂无快照（操作 10 次或 1 分钟后自动生成）' : '此时间点附近暂无事件'}
+          </span>
         ) : (
-          filteredEvents.map((r) => (
+          nearbyEvents.map((r) => (
             <div
               key={r.id}
               className="shrink-0 flex items-center gap-1.5 bg-st-bg border border-st-border rounded px-2 py-1"
@@ -113,6 +165,11 @@ function ReviewTimeline({ interactions }: ReviewTimelineProps) {
             </div>
           ))
         )}
+      </div>
+
+      {/* 快照统计 */}
+      <div className="text-xs text-gray-600 mt-1">
+        {sortedSnaps.length} 个快照 · 拖动滑块回放画布历史状态（仅本地可见）
       </div>
     </div>
   )
@@ -130,6 +187,12 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   // Review 模式
   const [isReview, setIsReview] = useState(false)
   const [interactions, setInteractions] = useState<InteractionRecord[]>([])
+  const [snapshots, setSnapshots] = useState<CanvasSnapshot[]>([])
+  // Review rewind：当前正在展示的只读 Y.Doc（null = 展示 live 状态）
+  const [rewindDoc, setRewindDoc] = useState<Y.Doc | null>(null)
+
+  // P4: 软删除确认弹窗
+  const [pendingDelete, setPendingDelete] = useState<PendingDeleteEvent | null>(null)
 
   // 邀请弹窗
   const [showInvite, setShowInvite] = useState(false)
@@ -157,6 +220,10 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
       const a = createSyncAdapter({
         channelId,
         enableWebrtc: true,
+        onPendingDelete: (event) => {
+          // P4: 软删除确认 — 展示确认弹窗
+          setPendingDelete(event)
+        },
       })
 
       adapterRef.current = a
@@ -188,15 +255,68 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     }
   }, [channelId, identity])
 
-  // Review 模式切换：加载 Interaction Log
+  // Review 模式切换：加载 Interaction Log + 快照列表
   const handleToggleReview = useCallback(async () => {
     const next = !isReview
     setIsReview(next)
     if (next) {
-      const data = await getInteractions(channelId)
+      const [data, snaps] = await Promise.all([
+        getInteractions(channelId),
+        getSnapshots(channelId),
+      ])
       setInteractions(data)
+      setSnapshots(snaps)
+    } else {
+      // 退出 Review 模式：清除 rewind 状态，恢复 live 画布
+      setRewindDoc(null)
     }
   }, [isReview, channelId])
+
+  // P4: rewind 回调 — 将 rewindDoc 的 records 临时渲染到 store（只读视图）
+  const handleRewind = useCallback(
+    (rewoundDoc: Y.Doc | null) => {
+      setRewindDoc(rewoundDoc)
+      const ed = editorRef.current
+      if (!ed) return
+
+      if (!rewoundDoc) {
+        // 恢复到 live 状态：重新从 adapter 的 store 同步
+        const liveAdapter = adapterRef.current
+        if (liveAdapter) {
+          const liveRecords = liveAdapter.ydoc
+            .getMap<TLRecord>('tldraw_records')
+            .values()
+          ed.store.mergeRemoteChanges(() => {
+            ed.store.put([...liveRecords])
+          })
+        }
+        return
+      }
+
+      // 把 rewindDoc 的画布状态强制写入 editor store（视觉展示，不触发同步）
+      const rewoundRecords = rewoundDoc.getMap<TLRecord>('tldraw_records')
+      const allRewound = [...rewoundRecords.values()]
+      const currentIds = [...ed.store.allRecords()]
+        .map((r) => r.id)
+        .filter((id) => id.startsWith('shape:'))
+
+      ed.store.mergeRemoteChanges(() => {
+        // 移除当前不在 rewind 快照里的 shape
+        const rewoundIds = new Set(allRewound.map((r) => r.id))
+        const toRemove = currentIds.filter((id) => !rewoundIds.has(id))
+        if (toRemove.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ed.store.remove(toRemove as any)
+        }
+        // 写入快照里的 shape
+        const shapes = allRewound.filter((r) => r.id.startsWith('shape:'))
+        if (shapes.length > 0) {
+          ed.store.put(shapes)
+        }
+      })
+    },
+    []
+  )
 
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
@@ -587,17 +707,86 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
             </div>
           </div>
         )}
+        {/* Review 模式：只读蒙层，防止误操作 */}
+        {isReview && rewindDoc && (
+          <div
+            className="absolute inset-0 z-20 pointer-events-none"
+            style={{ background: 'rgba(0,0,0,0.08)', mixBlendMode: 'multiply' }}
+          >
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-amber-500/90 text-black text-xs font-bold px-3 py-1 rounded-full pointer-events-none select-none">
+              📼 历史回放模式 — 只读
+            </div>
+          </div>
+        )}
         {adapter && (
           <Tldraw
             store={adapter.store}
             shapeUtils={CUSTOM_SHAPE_UTILS}
             onMount={handleMount as (editor: Editor) => void}
+            hideUi={isReview && rewindDoc !== null}
           />
         )}
       </div>
 
       {/* Review 时间轴 */}
-      {isReview && <ReviewTimeline interactions={interactions} />}
+      {isReview && (
+        <ReviewTimeline
+          snapshots={snapshots}
+          interactions={interactions}
+          onRewind={handleRewind}
+        />
+      )}
+
+      {/* P4: 软删除确认弹窗 */}
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
+          onClick={() => {
+            pendingDelete.cancel()
+            setPendingDelete(null)
+          }}
+        >
+          <div
+            className="bg-st-surface border border-red-500/60 rounded-xl p-6 w-[400px] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-2xl">⚠️</span>
+              <div>
+                <div className="text-sm font-semibold text-white">批量删除确认</div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  即将删除 {pendingDelete.shapeIds.length} 个元素，此操作会同步到所有在线成员
+                </div>
+              </div>
+            </div>
+            <div className="bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2 mb-4">
+              <div className="text-xs text-red-300 font-mono">
+                ⚠️ CRDT 删除不可逆。确认后其他 peer 也会失去这些内容。
+              </div>
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  pendingDelete.cancel()
+                  setPendingDelete(null)
+                }}
+                className="px-4 py-2 text-sm rounded-lg border border-st-border text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
+              >
+                取消（保留内容）
+              </button>
+              <button
+                onClick={() => {
+                  pendingDelete.confirm()
+                  setPendingDelete(null)
+                }}
+                className="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
+              >
+                确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
