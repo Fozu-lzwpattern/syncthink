@@ -28,6 +28,7 @@ import {
   defaultShapeUtils,
   type TLRecord,
   type TLStore,
+  type TLAnyShapeUtilConstructor,
 } from '@tldraw/tldraw'
 import { createSnapshotManager, type SnapshotManager } from './snapshots'
 
@@ -90,16 +91,22 @@ export interface SyncAdapterOptions {
    * 若未提供此回调，则所有删除直接执行（兼容旧行为）。
    */
   onPendingDelete?: (event: PendingDeleteEvent) => void
+  /**
+   * 自定义 ShapeUtil 列表，会合并到 defaultShapeUtils 注册到 store。
+   * 必须与 <Tldraw shapeUtils={...}> 保持一致，避免 schema 验证失败。
+   */
+  shapeUtils?: TLAnyShapeUtilConstructor[]
 }
 
 export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
   const {
     channelId,
-    signalingUrls = ['ws://localhost:4444', 'wss://signaling.yjs.dev'],
+    signalingUrls = [`${typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss' : 'ws'}://${typeof location !== 'undefined' ? location.host : 'localhost:5173'}/signaling`],
     enableWebrtc = true,
     trustedPeers,
     bannedPeers,
     onPendingDelete,
+    shapeUtils: customShapeUtils = [],
   } = options
 
   // P3: 访问控制集合
@@ -114,8 +121,8 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
   const ydoc = new Y.Doc()
   const yRecords = ydoc.getMap<TLRecord>('tldraw_records')
 
-  // 2. tldraw store
-  const store = createTLStore({ shapeUtils: defaultShapeUtils })
+  // 2. tldraw store（合并自定义 shapeUtils，与 <Tldraw> 保持一致）
+  const store = createTLStore({ shapeUtils: [...defaultShapeUtils, ...customShapeUtils] })
 
   // 3. 防循环 flag
   let isApplyingRemote = false

@@ -14,11 +14,18 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as Y from 'yjs'
 import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldraw'
-import { getAssetUrlsByImport } from '@tldraw/assets/imports.vite'
-
-const tldrawAssetUrls = getAssetUrlsByImport()
-// @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
+import type { TLUiAssetUrlOverrides } from '@tldraw/tldraw'
+
+// 本地字体（public/fonts/），不走 CDN
+const tldrawAssetUrls: TLUiAssetUrlOverrides = {
+  fonts: {
+    draw: '/fonts/Shantell_Sans-Informal_Regular.woff2',
+    monospace: '/fonts/IBMPlexMono-Medium.woff2',
+    sansSerif: '/fonts/IBMPlexSans-Medium.woff2',
+    serif: '/fonts/IBMPlexSerif-Medium.woff2',
+  },
+}
 import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
 import { joinChannel, getChannel, createChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
@@ -145,6 +152,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         channelId,
         enableWebrtc: true,
         onPendingDelete: (event) => setPendingDelete(event),
+        shapeUtils: CUSTOM_SHAPE_UTILS,
       })
       adapterRef.current = a
 
@@ -242,6 +250,30 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         cmd,
         prompt: cmd.confirmPrompt ?? `Agent 请求执行 ${cmd.action} 操作，是否允许？`,
       })
+      return
+    }
+
+    // ── shape:create（CLI 扁平格式：action='shape:create', type, title, body）──
+    if (cmd.action === 'shape:create') {
+      const c = cmd as unknown as Record<string, unknown>
+      const cardType = (c.type as string) ?? 'idea'
+      const title = (c.title as string) ?? ''
+      const body = (c.body as string) ?? ''
+      const id = createShapeId()
+      ed.createShape({
+        id, type: 'syncthink-card',
+        x: 150 + Math.random() * 400,
+        y: 150 + Math.random() * 300,
+        props: {
+          cardType: ['idea','decision','issue','action','reference'].includes(cardType) ? cardType : 'idea',
+          title,
+          body,
+          authorName: cmd.agentNodeId ? `Agent:${(cmd.agentNodeId as string).slice(0, 8)}` : 'Agent',
+          isAgentCreated: true,
+        },
+      })
+      agentBridge.emit({ type: 'shape:added', shapeId: id, timestamp: Date.now() })
+      await recordInteraction({ channelId, actorNodeId: cmd.agentNodeId ?? 'agent', type: 'agent_write', payload: { action: 'shape:create', shapeId: id } })
       return
     }
 

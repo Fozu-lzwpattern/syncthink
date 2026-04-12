@@ -56,7 +56,7 @@ export interface AgentChannelCreateData {
 }
 
 export interface AgentCommand {
-  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append' | 'channel:create' | 'chat' | 'distill'
+  action: 'create' | 'update' | 'delete' | 'clear' | 'conversation:append' | 'channel:create' | 'chat' | 'distill' | 'shape:create'
   shape?: AgentShape
   id?: string
   conversationAppend?: ConversationAppendData

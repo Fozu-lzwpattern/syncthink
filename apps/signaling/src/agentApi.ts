@@ -227,6 +227,11 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
     host = '127.0.0.1',
   } = opts
 
+  // y-webrtc 订阅 topic 格式为 "syncthink:<channelId>"，agentApi 收到的是裸 channelId
+  // 统一通过此函数查找 room
+  const getRoom = (channelId: string) =>
+    rooms.get(`syncthink:${channelId}`) ?? rooms.get(channelId)
+
   const log = (...args: unknown[]) => {
     if (verbose) console.log('[agent-api]', ...args)
   }
@@ -404,7 +409,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
         let proxyChannelId: string | undefined
 
         if (data.proxyChannelId) {
-          const r = rooms.get(data.proxyChannelId)
+          const r = getRoom(data.proxyChannelId)
           if (r && r.size > 0) {
             proxyRoom = r
             proxyChannelId = data.proxyChannelId
@@ -559,7 +564,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
         }
         // ─────────────────────────────────────────────────────────────────
 
-        const room = rooms.get(data.channelId)
+        const room = getRoom(data.channelId)
         if (!room || room.size === 0) {
           // No browser tab currently connected — still accept command (queued? no, Phase 1: immediate only)
           warn(`no active tab in channel: ${data.channelId}`)
@@ -663,7 +668,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
           params: Record<string, unknown>,
           channelId: string
         ): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
-          const room = rooms.get(channelId)
+          const room = getRoom(channelId)
           if (!room || room.size === 0) {
             return { ok: false, error: 'no_active_canvas_tab' }
           }

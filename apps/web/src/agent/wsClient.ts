@@ -68,7 +68,10 @@ export class AgentWsClient {
     this.channelId = opts.channelId
     this.nodeId = opts.nodeId
     this.publicKey = opts.publicKey
-    this.signalingUrl = opts.signalingUrl ?? `ws://localhost:4444`
+    // 默认走 vite proxy (/signaling) → wss://localhost:4443（绕过自签名证书）
+    // 生产环境通过 opts.signalingUrl 显式传入
+    const defaultUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/signaling`
+    this.signalingUrl = opts.signalingUrl ?? defaultUrl
     this.reconnectMs = opts.reconnectMs ?? 3000
     this.verbose = opts.verbose ?? true
     this.inviteToken = opts.inviteToken
