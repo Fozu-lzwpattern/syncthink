@@ -1,5 +1,5 @@
 /**
- * SyncThink 信令服务器 v0.5.0 (Phase 3 + TLS + Agent API + Network Policy)
+ * SyncThink 信令服务器 v0.6.0 (mTLS + 能力令牌 + Network Policy)
  *
  * 职责（纯中转，Zero Trust）：
  * - WebSocket 消息转发：subscribe / unsubscribe / publish
@@ -9,26 +9,33 @@
  * - HTTP/HTTPS 健康检查端点
  * - Agent API（port 9527）：HTTP + WS，供外部 AI Agent 程序化操作画布
  *
- * TLS 自动化（三层兜底，零用户感知）：
- * - 层1：WSS_CERT + WSS_KEY 环境变量（手动配置优先）
- * - 层2：mkcert 自动生成本地受信证书（推荐，浏览器无警告）
- * - 层3：openssl/node-forge 自签名证书（兜底，浏览器弹一次警告）
- * - WSS=false → 强制 ws://（纯开发模式）
+ * TLS 模式（按优先级自动选择）：
+ * - 模式0：mTLS（PKI 证书存在时自动启用，Agent 客户端必须持有 CA 签发证书）
+ *   - 证书路径：~/.syncthink/pki/ca-cert.pem / server-cert.pem / server-key.pem
+ *   - 生成脚本：apps/signaling/scripts/setup-pki.sh
+ * - 模式1：WSS_CERT + WSS_KEY 环境变量（手动配置优先）
+ * - 模式2：mkcert 自动生成本地受信证书（推荐，浏览器无警告）
+ * - 模式3：openssl/node-forge 自签名证书（兜底，浏览器弹一次警告）
+ * - WSS=false → 强制 ws://（纯开发模式，跳过全部 TLS）
  *
  * 环境变量：
- * - PORT          监听端口（默认 WSS=4443, WS=4444）
- * - HOST          监听地址（默认 0.0.0.0）
- * - WSS           是否启用 TLS（默认 true；设 false 强制 ws://）
- * - WSS_CERT      TLS 证书路径（层1）
- * - WSS_KEY       TLS 私钥路径（层1）
- * - AUTH_REQUIRED 是否强制握手验签（默认 false；生产建议 true）
- * - VERBOSE       是否打印详细日志（默认 true）
+ * - PORT            监听端口（默认 mTLS/WSS=4443, WS=4444）
+ * - HOST            监听地址（默认 0.0.0.0）
+ * - WSS             是否启用 TLS（默认 true；设 false 强制 ws://）
+ * - MTLS_ENABLED    强制启用/禁用 mTLS（不设则自动检测 PKI 文件）
+ * - MTLS_OPTIONAL   设为 true 时 mTLS 为可选（无证书客户端降级到 Ed25519 验签）
+ * - WSS_CERT        TLS 证书路径（模式1）
+ * - WSS_KEY         TLS 私钥路径（模式1）
+ * - AUTH_REQUIRED   是否强制握手验签（默认 false；生产建议 true）
+ * - VERBOSE         是否打印详细日志（默认 true）
  *
  * 启动: npx tsx src/index.ts
  */
 
 import * as WebSocket from 'ws'
-import { autoTLS, createServer, getPort, getProtocol } from './tls'
+import * as https from 'https'
+import { autoTLS, createServer, createMTLSServer, loadMTLSConfig, getPort, getProtocol } from './tls'
+import { loadMtlsConfig, readMtlsOptions, checkClientCert } from './mtls/index'
 import { startAgentApi } from './agentApi'
 
 // ─── 配置 ───────────────────────────────────────────────────────────────────
@@ -234,38 +241,111 @@ function getOrCreateRoom(name: string): Set<WebSocket.WebSocket> {
   return rooms.get(name)!
 }
 
+// ─── mTLS 配置 ───────────────────────────────────────────────────────────────
+
+/**
+ * mTLS 是否可选（MTLS_OPTIONAL=true 时，无证书客户端降级到 Ed25519 验签而非直接断开）
+ * 生产建议保持 false（严格模式），开发期可开启以便浏览器 tab 不带证书也能接入
+ */
+const MTLS_OPTIONAL = process.env.MTLS_OPTIONAL === 'true'
+
+/**
+ * 尝试加载 mTLS 配置（使用 mtls/ 模块，路径 ~/.syncthink/pki/）
+ * 若 MTLS_ENABLED=false 强制跳过
+ */
+function tryLoadMtls() {
+  if (process.env.MTLS_ENABLED === 'false') return null
+  const config = loadMtlsConfig()
+  if (!config.enabled) return null
+  const opts = readMtlsOptions(config)
+  return opts ? { config, opts } : null
+}
+
 // ─── 启动 ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  // TLS 自动化（三层兜底）
-  const tlsConfig = await autoTLS()
-  const protocol = getProtocol(tlsConfig)
-  const PORT = getPort(tlsConfig)
+  // ── mTLS 检测（优先级最高）────────────────────────────────────────────────
+  const mtls = tryLoadMtls()
 
-  // 创建 HTTP 或 HTTPS 服务器
-  const server = createServer(tlsConfig, (_req, res) => {
+  // ── 普通 TLS 自动化（三层兜底，mTLS 未启用时使用）────────────────────────
+  const tlsConfig = mtls ? null : await autoTLS()
+
+  // mTLS 也是一种 TLS，端口/协议与普通 WSS 一致
+  const hasTls = !!mtls || !!tlsConfig
+  const protocol: 'wss' | 'ws' = hasTls ? 'wss' : 'ws'
+  const PORT = process.env.PORT ? Number(process.env.PORT) : (hasTls ? 4443 : 4444)
+
+  // ── 健康检查 Handler ─────────────────────────────────────────────────────
+  function healthHandler(_req: import('http').IncomingMessage, res: import('http').ServerResponse) {
     const totalPeers = [...rooms.values()].reduce((s, r) => s + r.size, 0)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
       service: 'syncthink-signaling',
-      version: '0.5.0',
-      phase: '3+network-policy',
-      protocol,
-      tls_source: tlsConfig?.source ?? null,
+      version: '0.6.0',
+      phase: 'mtls+capability-token',
+      protocol: mtls ? 'wss+mtls' : protocol,
+      tls_source: mtls ? 'pki' : (tlsConfig?.source ?? null),
+      mtls_enabled: !!mtls,
+      mtls_optional: mtls ? MTLS_OPTIONAL : false,
       auth_required: AUTH_REQUIRED,
       rooms: rooms.size,
       peers: totalPeers,
       audit_entries: auditLog.size,
       room_policies: Object.fromEntries(roomPolicies),
     }))
-  })
+  }
+
+  // ── 创建服务器（mTLS / 普通 TLS / 纯 HTTP）────────────────────────────────
+  let server: import('http').Server | import('https').Server
+
+  if (mtls) {
+    // mTLS 模式：requestCert=true，rejectUnauthorized 由 MTLS_OPTIONAL 控制
+    // MTLS_OPTIONAL=true → rejectUnauthorized=false（在业务层软拒绝）
+    // MTLS_OPTIONAL=false → rejectUnauthorized=true（TLS 握手层硬拒绝）
+    const mtlsServerOpts = MTLS_OPTIONAL
+      ? { ...mtls.opts, rejectUnauthorized: false as const }
+      : mtls.opts
+    server = https.createServer(mtlsServerOpts, healthHandler)
+    log(`🔐 mTLS 模式已启用 (rejectUnauthorized=${!MTLS_OPTIONAL})`)
+    log(`   CA 证书: ${mtls.config.caCertPath}`)
+    log(`   服务端证书: ${mtls.config.serverCertPath}`)
+    if (MTLS_OPTIONAL) {
+      log(`   ⚠️  MTLS_OPTIONAL=true — 无证书客户端将降级到 Ed25519 验签`)
+    }
+  } else {
+    server = createServer(tlsConfig, healthHandler)
+  }
 
   // WebSocket 服务
   const wss = new WebSocket.WebSocketServer({ server })
 
   wss.on('connection', (ws: WebSocket.WebSocket, req) => {
     const remoteIp = req.socket.remoteAddress ?? 'unknown'
-    log(`new connection from ${remoteIp}`)
+
+    // ── mTLS 连接层检查 ───────────────────────────────────────────────────
+    // 从 TLS socket 提取客户端证书，作为 Agent 身份的附加信息
+    // MTLS_OPTIONAL=true 时无证书也允许（降级到握手包 Ed25519 验签）
+    let mtlsClientCn: string | null = null
+    if (mtls) {
+      const certResult = checkClientCert(req)
+      if (certResult.ok) {
+        mtlsClientCn = certResult.clientInfo.cn
+        log(`🔐 mTLS client connected — CN: ${mtlsClientCn} fingerprint: ${certResult.clientInfo.fingerprint.slice(0, 16)}…`)
+      } else if (!MTLS_OPTIONAL) {
+        // 严格模式：无有效证书时（理论上 TLS 层已拒绝，这是双重保险）
+        const reason = certResult.reason
+        warn(`mTLS: rejected connection from ${remoteIp} — ${reason}`)
+        ws.send(JSON.stringify({ type: 'syncthink:join_rejected', reason: `mtls_required: ${reason}`, timestamp: Date.now() }))
+        ws.terminate()
+        return
+      } else {
+        // 可选模式：降级日志
+        const reason = certResult.reason
+        log(`mTLS: no client cert from ${remoteIp} (${reason}), falling back to Ed25519 handshake`)
+      }
+    }
+
+    log(`new connection from ${remoteIp}${mtlsClientCn ? ` (mTLS CN: ${mtlsClientCn})` : ''}`)
 
     const subscribedRooms = new Set<string>()
 
@@ -445,12 +525,26 @@ async function main() {
   // 启动
   server.listen(PORT, HOST, () => {
     console.log('')
-    console.log(`  ╔═══════════════════════════════════════╗`)
-    console.log(`  ║  ⟁  SyncThink Signaling  v0.5.0     ║`)
-    console.log(`  ╚═══════════════════════════════════════╝`)
+    console.log(`  ╔════════════════════════════════════════╗`)
+    console.log(`  ║  ⟁  SyncThink Signaling  v0.6.0      ║`)
+    console.log(`  ╚════════════════════════════════════════╝`)
     console.log('')
-    console.log(`  ${protocol.toUpperCase()} ✅  ${protocol}://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
-    if (tlsConfig) {
+
+    const displayProtocol = mtls ? 'wss+mtls' : protocol
+    console.log(`  ${displayProtocol.toUpperCase()} ✅  wss://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
+
+    if (mtls) {
+      console.log(`  🔐  mTLS 模式（私有 CA 签发证书，Agent 必须持有客户端证书）`)
+      console.log(`  📁  PKI 路径: ~/.syncthink/pki/`)
+      if (MTLS_OPTIONAL) {
+        console.log(`  ⚠️   MTLS_OPTIONAL=true — 无证书客户端允许接入（降级模式）`)
+      } else {
+        console.log(`  🛡️   严格模式 — 无证书客户端直接被 TLS 层拒绝`)
+      }
+      console.log(``)
+      console.log(`  💡 生成 Agent 客户端证书:`)
+      console.log(`     bash apps/signaling/scripts/setup-pki.sh`)
+    } else if (tlsConfig) {
       const sourceLabel = {
         env: '证书来源: 环境变量（WSS_CERT / WSS_KEY）',
         mkcert: '证书来源: mkcert（浏览器完全信任 🔒）',
@@ -460,15 +554,24 @@ async function main() {
     } else {
       console.log(`  ⚡  WS 模式（无 TLS，仅限本地开发）`)
     }
+
     console.log(`  🔑  auth_required: ${AUTH_REQUIRED}`)
     console.log(`  ⏱   replay_window: ±${REPLAY_WINDOW_MS / 1000}s`)
     console.log('')
-    if (!tlsConfig) {
+
+    if (!mtls && !tlsConfig) {
       console.log(`  💡 启用 WSS: 安装 mkcert 后重启即可自动获得 TLS`)
       console.log(`     macOS: brew install mkcert`)
       console.log(`     Linux: https://github.com/FiloSottile/mkcert#linux`)
+      console.log(`  💡 启用 mTLS: bash apps/signaling/scripts/setup-pki.sh`)
       console.log('')
     }
+
+    if (!mtls) {
+      console.log(`  💡 启用 mTLS（Agent 证书鉴权）: bash apps/signaling/scripts/setup-pki.sh`)
+      console.log('')
+    }
+
     if (!AUTH_REQUIRED) {
       console.log(`  ⚠️   AUTH_REQUIRED=false (dev mode) — 生产环境建议设为 true`)
       console.log('')
