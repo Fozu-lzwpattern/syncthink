@@ -102,10 +102,12 @@ export class AgentWsClient {
 
     this.ws.addEventListener('open', async () => {
       this.log(`connected ✅, subscribing room: ${this.channelId}`)
-      // 订阅 channel room（与 y-webrtc 使用同一 room 名）
+      // 订阅两个 room：
+      // 1. this.channelId（裸名，用于 y-webrtc 兼容）
+      // 2. syncthink:${channelId}（带前缀，agentApi 转发 agent_command 用的 key）
       this.ws!.send(JSON.stringify({
         type: 'subscribe',
-        topics: [this.channelId],
+        topics: [this.channelId, `syncthink:${this.channelId}`],
       }))
 
       // 发送 syncthink:join 握手包（宣告身份，触发 peer_joined 广播）
