@@ -415,6 +415,8 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
   // ── handleMount（场景初始化 + agent:command 监听）─────────────────────────
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
+    // dev helper: expose editor globally for debugging
+    ;(window as unknown as Record<string, unknown>).__tl_editor = editor
 
     getChannel(channelId).then(async (ch) => {
       if (ch?.sceneId === 'debate-v1') {
