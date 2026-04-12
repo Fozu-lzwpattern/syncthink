@@ -1,10 +1,15 @@
 /**
- * 画布页 — 进入 Channel 后的主界面
- * - 初始化 Sync Adapter（tldraw store ↔ Yjs）
- * - 渲染 tldraw 画布
- * - 顶部状态栏：Channel ID、在线人数、返回按钮
- * - Phase 2：ConversationNode / AgentNode 创建按钮 + Review 模式
- * - Phase 4：软删除确认弹窗（方案B）+ 快照 rewind Review（方案C）
+ * CanvasPage — 画布主页（重构后）
+ *
+ * 职责：组合 hook + 渲染骨架。
+ * 业务逻辑已拆分到：
+ *   - hooks/useAccessControl  — peer 准入
+ *   - hooks/useCanvasQuery    — Agent 画布读取
+ *   - hooks/useSceneEvents    — 场景事件（rabbit-hole/gap/vote/status）
+ *   - hooks/useChat           — chat-v1 消息流
+ *   - hooks/useInvite         — 邀请链接
+ *   - components/ReviewTimeline
+ *   - components/dialogs/*    — 5 个弹窗
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as Y from 'yjs'
@@ -12,9 +17,9 @@ import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldra
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
-import { joinChannel, getChannel, createChannel, verifyInviteCode, consumeInviteCode, revokeAllInviteCodes } from '../channel/channel'
+import { joinChannel, getChannel, createChannel } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
-import { recordInteraction, getInteractions, type InteractionRecord } from '../interaction/log'
+import { recordInteraction, getInteractions } from '../interaction/log'
 import { agentBridge, type AgentCommand, type ConversationAppendData } from '../agent/server'
 import { AgentWsClient } from '../agent/wsClient'
 import type { ConversationMessage, ConversationShapeProps } from '../shapes/ConversationShape'
@@ -39,10 +44,22 @@ import { ChatPanel } from './ChatPanel'
 import type { ChatMessage } from '../scenes/chat/types'
 import { chatMsgId } from '../scenes/chat/types'
 import { deriveAvatarColor } from '../identity/nodeIdentity'
-import { getSnapshots, rewindToSnapshot, type CanvasSnapshot } from '../sync/snapshots'
-import { db } from '../lib/db'
+import { getSnapshots, type CanvasSnapshot } from '../sync/snapshots'
 import type { DebateStance } from '../scenes/debate/types'
-import { stanceConfig } from '../scenes/debate/types'
+import { db } from '../lib/db'
+// hooks
+import { useAccessControl } from '../hooks/useAccessControl'
+import { useCanvasQuery } from '../hooks/useCanvasQuery'
+import { useSceneEvents } from '../hooks/useSceneEvents'
+import { useChat } from '../hooks/useChat'
+import { useInvite } from '../hooks/useInvite'
+// components
+import { ReviewTimeline } from './ReviewTimeline'
+import { InviteDialog } from './dialogs/InviteDialog'
+import { ConfirmDeleteDialog } from './dialogs/ConfirmDeleteDialog'
+import { AgentConfirmDialog } from './dialogs/AgentConfirmDialog'
+import { DebateStanceModal } from './dialogs/DebateStanceModal'
+import { SpawnedChannelDialog } from './dialogs/SpawnedChannelDialog'
 
 const CUSTOM_SHAPE_UTILS = [
   LocalServicesCardShapeUtil,
@@ -61,202 +78,52 @@ interface Props {
   onBack: () => void
 }
 
-// ---- 相对时间 ----
-function relTime(ts: number): string {
-  const diff = Date.now() - ts
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h前`
-  return `${Math.floor(diff / 86_400_000)}d前`
-}
-
-// ---- Review 时间轴组件（方案C：快照 Rewind）----
-interface ReviewTimelineProps {
-  snapshots: CanvasSnapshot[]
-  interactions: InteractionRecord[]
-  /** 拖动滑块时，把 rewind 到对应快照的 ydoc 传出去 */
-  onRewind: (ydoc: Y.Doc | null) => void
-}
-
-function ReviewTimeline({ snapshots, interactions, onRewind }: ReviewTimelineProps) {
-  const sortedSnaps = [...snapshots].sort((a, b) => a.timestamp - b.timestamp)
-  const sortedEvents = [...interactions].sort((a, b) => a.timestamp - b.timestamp)
-
-  const earliest = sortedSnaps[0]?.timestamp ?? sortedEvents[0]?.timestamp ?? Date.now()
-  const latest =
-    sortedSnaps[sortedSnaps.length - 1]?.timestamp ??
-    sortedEvents[sortedEvents.length - 1]?.timestamp ??
-    Date.now()
-
-  const [sliderValue, setSliderValue] = useState(latest)
-  const [isRewinding, setIsRewinding] = useState(false)
-
-  const formatTs = (ts: number) =>
-    new Date(ts).toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-
-  const handleSliderChange = useCallback(
-    async (value: number) => {
-      setSliderValue(value)
-      if (sortedSnaps.length === 0) {
-        onRewind(null)
-        return
-      }
-      setIsRewinding(true)
-      try {
-        const channelId = sortedSnaps[0]?.channelId ?? ''
-        const rewound = await rewindToSnapshot(channelId, value)
-        onRewind(rewound)
-      } finally {
-        setIsRewinding(false)
-      }
-    },
-    [sortedSnaps, onRewind]
-  )
-
-  // 当前时间点附近的事件（±30s 内）
-  const nearbyEvents = sortedEvents
-    .filter((r) => Math.abs(r.timestamp - sliderValue) <= 30_000)
-    .slice(-5)
-    .reverse()
-
-  const snapMarkers = sortedSnaps.map((s) => ({
-    pct: latest === earliest ? 0 : ((s.timestamp - earliest) / (latest - earliest)) * 100,
-    ts: s.timestamp,
-  }))
-
-  return (
-    <div
-      className="shrink-0 border-t border-st-border bg-st-surface px-4 py-2"
-      style={{ zIndex: 10 }}
-    >
-      {/* 快照标记 + 滑块 */}
-      <div className="relative flex items-center gap-3 mb-2">
-        <span className="text-xs text-gray-500 whitespace-nowrap font-mono shrink-0">
-          {formatTs(earliest)}
-        </span>
-        <div className="relative flex-1">
-          {/* 快照刻度点 */}
-          {snapMarkers.map((m) => (
-            <div
-              key={m.ts}
-              title={`快照 @ ${formatTs(m.ts)}`}
-              className="absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-70 pointer-events-none"
-              style={{ left: `${m.pct}%` }}
-            />
-          ))}
-          <input
-            type="range"
-            className="w-full accent-cyan-400"
-            min={earliest}
-            max={latest === earliest ? earliest + 1 : latest}
-            value={sliderValue}
-            step={1}
-            onChange={(e) => handleSliderChange(Number(e.target.value))}
-          />
-        </div>
-        <span className="text-xs text-gray-500 whitespace-nowrap font-mono shrink-0">
-          {formatTs(latest)}
-        </span>
-        <span className="text-xs text-st-cyan font-mono whitespace-nowrap shrink-0">
-          {isRewinding ? '⏳ 回放中…' : `@ ${formatTs(sliderValue)}`}
-        </span>
-      </div>
-
-      {/* 周边事件列表 */}
-      <div className="flex gap-2 overflow-x-auto pb-1">
-        {nearbyEvents.length === 0 ? (
-          <span className="text-xs text-gray-600">
-            {sortedSnaps.length === 0 ? '暂无快照（操作 10 次或 1 分钟后自动生成）' : '此时间点附近暂无事件'}
-          </span>
-        ) : (
-          nearbyEvents.map((r) => (
-            <div
-              key={r.id}
-              className="shrink-0 flex items-center gap-1.5 bg-st-bg border border-st-border rounded px-2 py-1"
-            >
-              <span className="text-xs font-mono text-gray-400">
-                {r.actorNodeId.slice(0, 6)}
-              </span>
-              <span className="text-xs text-st-cyan">{r.type}</span>
-              <span className="text-xs text-gray-600">{relTime(r.timestamp)}</span>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* 快照统计 */}
-      <div className="text-xs text-gray-600 mt-1">
-        {sortedSnaps.length} 个快照 · 拖动滑块回放画布历史状态（仅本地可见）
-      </div>
-    </div>
-  )
-}
-
-// ---- 主组件 ----
-
 export function CanvasPage({ channelId, identity, onBack }: Props) {
   const adapterRef = useRef<SyncAdapter | null>(null)
   const editorRef = useRef<Editor | null>(null)
+  const wsClientRef = useRef<AgentWsClient | null>(null)
+
   const [adapter, setAdapter] = useState<SyncAdapter | null>(null)
   const [peers, setPeers] = useState(0)
   const [syncReady, setSyncReady] = useState(false)
 
   // Review 模式
   const [isReview, setIsReview] = useState(false)
-  const [interactions, setInteractions] = useState<InteractionRecord[]>([])
+  const [interactions, setInteractions] = useState<ReturnType<typeof getInteractions> extends Promise<infer T> ? T : never>([])
   const [snapshots, setSnapshots] = useState<CanvasSnapshot[]>([])
-  // Review rewind：当前正在展示的只读 Y.Doc（null = 展示 live 状态）
   const [rewindDoc, setRewindDoc] = useState<Y.Doc | null>(null)
 
-  // P4: 软删除确认弹窗
+  // 弹窗状态
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteEvent | null>(null)
-
-  // Agent 写入确认弹窗
-  const [pendingAgentCmd, setPendingAgentCmd] = useState<{
-    cmd: AgentCommand
-    prompt: string
-  } | null>(null)
-
-  // 邀请弹窗
-  const [showInvite, setShowInvite] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [inviteIsOwner, setInviteIsOwner] = useState(false)
-  const [revokeConfirm, setRevokeConfirm] = useState(false)
-  const [revoking, setRevoking] = useState(false)
-
-  // 卡片类型菜单
+  const [pendingAgentCmd, setPendingAgentCmd] = useState<{ cmd: AgentCommand; prompt: string } | null>(null)
   const [showCardMenu, setShowCardMenu] = useState(false)
-
-  // ── Debate: stance 声明弹窗 ──────────────────────────────────────────────
   const [showStanceModal, setShowStanceModal] = useState(false)
-  const [myStance, setMyStance] = useState<DebateStance | null>(null)
-  const [stanceLoading, setStanceLoading] = useState(false)
+  const [_myStance, setMyStance] = useState<DebateStance | null>(null)
+  const [spawnedChannel, setSpawnedChannel] = useState<{ channelId: string; title: string } | null>(null)
 
-  // ── rabbit-hole 分裂：子 Channel 跳转弹窗 ────────────────────────────────
-  const [spawnedChannel, setSpawnedChannel] = useState<{
-    channelId: string
-    title: string
-  } | null>(null)
+  // ── hooks ──────────────────────────────────────────────────────────────────
 
-  // ── chat-v1 场景：消息流状态 ──────────────────────────────────────────────
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
-  const [isChat, setIsChat] = useState(false)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const chatYArrayRef = useRef<Y.Array<any> | null>(null)
-  const wsClientRef = useRef<AgentWsClient | null>(null)
+  useAccessControl({ channelId, identity, adapterRef, wsClientRef })
+  useCanvasQuery({ channelId, editorRef, wsClientRef })
+  useSceneEvents({ channelId, identity, editorRef, onChannelSpawned: setSpawnedChannel })
 
+  const invite = useInvite({ channelId, identity })
+
+  const chat = useChat({
+    channelId,
+    identity,
+    adapterRef,
+    wsClientRef,
+    editorRef,
+  })
+
+  // ── 初始化（WebRTC adapter + WsClient）────────────────────────────────────
   useEffect(() => {
     let destroyed = false
 
-    // 从 URL 读 inviteToken（?invite=<base64url>）
     const urlParams = new URLSearchParams(window.location.search)
     const inviteToken = urlParams.get('invite') ?? undefined
 
-    // Agent WS Client（连 signaling + 发 syncthink:join 握手）
     const wsClient = new AgentWsClient({
       channelId,
       nodeId: identity.nodeId,
@@ -267,143 +134,34 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
     wsClient.start()
     wsClientRef.current = wsClient
 
-    // ── 准入检测：peer_joined → owner 侧判断是否放行 ──────────────────────
-    // 只有 Channel owner 做决策，其他成员只是同步 trustPeer 结果
-    const handlePeerJoined = async (e: Event) => {
-      const { nodeId, publicKey, inviteToken } = (e as CustomEvent<{
-        nodeId: string
-        publicKey: string
-        inviteToken?: string
-        timestamp: number
-      }>).detail
-
-      const channel = await getChannel(channelId)
-      if (!channel) return
-
-      const isOwner = channel.ownerNodeId === identity.nodeId
-
-      if (!isOwner) {
-        // 非 owner：等待 peer_admit 事件到来后再 trustPeer（见 handlePeerAdmit）
-        return
-      }
-
-      // ① 黑名单检查
-      if (channel.bannedNodes?.includes(publicKey)) {
-        wsClient.sendPeerReject(nodeId, 'banned')
-        return
-      }
-
-      const policy = channel.accessPolicy ?? 'whitelist'
-
-      // ② 策略分支
-      if (policy === 'open' || policy === 'lan-only' || policy === 'cidr') {
-        // IP 策略信令层已检查通过，直接放行
-        adapterRef.current?.trustPeer(publicKey)
-        wsClient.sendPeerAdmit(nodeId, publicKey, 'editor')
-        return
-      }
-
-      // policy === 'whitelist'
-      if (channel.trustedNodes?.includes(publicKey)) {
-        // 已在白名单中，直接放行
-        adapterRef.current?.trustPeer(publicKey)
-        wsClient.sendPeerAdmit(nodeId, publicKey, 'editor')
-        return
-      }
-
-      // 不在白名单，检查 inviteCode
-      if (!inviteToken) {
-        wsClient.sendPeerReject(nodeId, 'not_trusted')
-        return
-      }
-
-      const result = await verifyInviteCode(channel, inviteToken, publicKey)
-      if (!result.valid) {
-        wsClient.sendPeerReject(nodeId, result.reason ?? 'invalid_invite')
-        return
-      }
-
-      // 验证通过：消费 token + trustPeer + peer_admit
-      await consumeInviteCode(channelId, (() => {
-        // 从 inviteToken 中提取 oneTimeToken（decodeInviteCode 已在 verifyInviteCode 里调用过）
-        try {
-          const b64 = inviteToken.replace(/-/g, '+').replace(/_/g, '/')
-          const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4)
-          const inv = JSON.parse(atob(padded)) as { oneTimeToken: string }
-          return inv.oneTimeToken
-        } catch {
-          return inviteToken
-        }
-      })(), publicKey)
-
-      adapterRef.current?.trustPeer(publicKey)
-      wsClient.sendPeerAdmit(nodeId, publicKey, 'editor')
-    }
-
-    // ── peer_admit：非 owner 成员收到后同步 trustPeer ───────────────────
-    const handlePeerAdmit = (e: Event) => {
-      const { publicKey } = (e as CustomEvent<{ publicKey: string }>).detail
-      adapterRef.current?.trustPeer(publicKey)
-    }
-
-    window.addEventListener('syncthink:peer_joined', handlePeerJoined)
-    window.addEventListener('syncthink:peer_admit', handlePeerAdmit)
-
     async function init() {
-      // 确保本地 Channel 记录存在
       await joinChannel(channelId, identity)
-      await recordInteraction({
-        channelId,
-        actorNodeId: identity.nodeId,
-        type: 'channel_joined',
-      })
+      await recordInteraction({ channelId, actorNodeId: identity.nodeId, type: 'channel_joined' })
 
       const a = createSyncAdapter({
         channelId,
         enableWebrtc: true,
-        onPendingDelete: (event) => {
-          // P4: 软删除确认 — 展示确认弹窗
-          setPendingDelete(event)
-        },
+        onPendingDelete: (event) => setPendingDelete(event),
       })
-
       adapterRef.current = a
 
-      // ── Awareness Presence：设置本地节点身份，让其他 Peer 看到颜色/名字 ──
-      // provider 在 WebRTC 握手完成后才可用，稍作延迟等待 provider 建立
-      // 放在 setTimeout(0) 里，确保 provider 已附加到 adapter
       setTimeout(() => {
         a.setLocalPresence({
           nodeId: identity.nodeId,
           displayName: identity.displayName,
           color: identity.avatarColor,
-          isAgent: false,   // 人类节点
+          isAgent: false,
         })
       }, 0)
 
-      // 等 IndexedDB 加载完成再渲染
       a.persistence.whenSynced.then(async () => {
         if (!destroyed) {
           setSyncReady(true)
           setAdapter(a)
-
-          // chat-v1 场景：订阅 Y.Array<ChatMessage> 实时更新
-          const ch = await getChannel(channelId)
-          if (ch?.sceneId === 'chat-v1') {
-            setIsChat(true)
-            const yArr = a.ydoc.getArray<ChatMessage>('chat-messages')
-            chatYArrayRef.current = yArr
-            // 初始加载
-            setChatMessages([...yArr.toArray()])
-            // 实时监听变更（P2P 同步触发）
-            yArr.observe(() => {
-              if (!destroyed) setChatMessages([...yArr.toArray()])
-            })
-          }
+          await chat.initChat(a)
         }
       })
 
-      // 轮询 peer 数量
       const peerInterval = setInterval(() => {
         if (!destroyed) setPeers(a.getConnectedPeers())
       }, 2000)
@@ -415,17 +173,17 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
     return () => {
       destroyed = true
-      window.removeEventListener('syncthink:peer_joined', handlePeerJoined)
-      window.removeEventListener('syncthink:peer_admit', handlePeerAdmit)
+      chat.resetChat()
       wsClient.destroy()
       wsClientRef.current = null
       cleanupPromise.then((cleanup) => cleanup?.())
       adapterRef.current?.destroy()
       adapterRef.current = null
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId, identity])
 
-  // Review 模式切换：加载 Interaction Log + 快照列表
+  // ── Review 模式切换 ────────────────────────────────────────────────────────
   const handleToggleReview = useCallback(async () => {
     const next = !isReview
     setIsReview(next)
@@ -437,981 +195,303 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
       setInteractions(data)
       setSnapshots(snaps)
     } else {
-      // 退出 Review 模式：清除 rewind 状态，恢复 live 画布
       setRewindDoc(null)
     }
   }, [isReview, channelId])
 
-  // P4: rewind 回调 — 将 rewindDoc 的 records 临时渲染到 store（只读视图）
-  const handleRewind = useCallback(
-    (rewoundDoc: Y.Doc | null) => {
-      setRewindDoc(rewoundDoc)
-      const ed = editorRef.current
-      if (!ed) return
+  // ── Review rewind ──────────────────────────────────────────────────────────
+  const handleRewind = useCallback((rewoundDoc: Y.Doc | null) => {
+    setRewindDoc(rewoundDoc)
+    const ed = editorRef.current
+    if (!ed) return
 
-      if (!rewoundDoc) {
-        // 恢复到 live 状态：重新从 adapter 的 store 同步
-        const liveAdapter = adapterRef.current
-        if (liveAdapter) {
-          const liveRecords = liveAdapter.ydoc
-            .getMap<TLRecord>('tldraw_records')
-            .values()
-          ed.store.mergeRemoteChanges(() => {
-            ed.store.put([...liveRecords])
-          })
+    if (!rewoundDoc) {
+      const liveAdapter = adapterRef.current
+      if (liveAdapter) {
+        const liveRecords = liveAdapter.ydoc.getMap<TLRecord>('tldraw_records').values()
+        ed.store.mergeRemoteChanges(() => { ed.store.put([...liveRecords]) })
+      }
+      return
+    }
+
+    const rewoundRecords = rewoundDoc.getMap<TLRecord>('tldraw_records')
+    const allRewound = [...rewoundRecords.values()]
+    const currentIds = [...ed.store.allRecords()].map((r) => r.id).filter((id) => id.startsWith('shape:'))
+
+    ed.store.mergeRemoteChanges(() => {
+      const rewoundIds = new Set(allRewound.map((r) => r.id))
+      const toRemove = currentIds.filter((id) => !rewoundIds.has(id))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (toRemove.length > 0) ed.store.remove(toRemove as any)
+      const shapes = allRewound.filter((r) => r.id.startsWith('shape:'))
+      if (shapes.length > 0) ed.store.put(shapes)
+    })
+  }, [])
+
+  // ── Agent 指令处理（挂在 handleMount 里）────────────────────────────────────
+  const handleAgentCommand = useCallback(async (e: Event) => {
+    const cmd = (e as CustomEvent<AgentCommand>).detail
+    const ed = editorRef.current
+    if (!ed) return
+
+    if (cmd.requiresConfirmation) {
+      setPendingAgentCmd({
+        cmd,
+        prompt: cmd.confirmPrompt ?? `Agent 请求执行 ${cmd.action} 操作，是否允许？`,
+      })
+      return
+    }
+
+    // ── create ──────────────────────────────────────────────────────────────
+    if (cmd.action === 'create' && cmd.shape) {
+      const s = cmd.shape
+      const id = createShapeId()
+      if (s.type === 'text' || s.type === 'sticky') {
+        ed.createShape({
+          id, type: s.type === 'sticky' ? 'note' : 'text',
+          x: s.x, y: s.y,
+          props: { text: s.text ?? '', ...(s.color ? { color: s.color } : {}) },
+        })
+      } else if (s.type === 'geo') {
+        ed.createShape({
+          id, type: 'geo',
+          x: s.x, y: s.y,
+          props: { geo: 'rectangle', w: s.w ?? 200, h: s.h ?? 80, text: s.text ?? '', ...(s.color ? { color: s.color } : {}) },
+        })
+      } else if (s.type === 'syncthink-card') {
+        const cardProps = (s.props ?? {}) as Record<string, unknown>
+        ed.createShape({
+          id, type: 'syncthink-card',
+          x: s.x, y: s.y,
+          props: {
+            cardType: cardProps.cardType ?? 'idea',
+            title: cardProps.title ?? s.text ?? '',
+            body: cardProps.body ?? '',
+            tags: cardProps.tags ?? [],
+            status: cardProps.status ?? 'open',
+            authorName: cardProps.authorName ?? (cmd.agentNodeId ? `Agent:${cmd.agentNodeId.slice(0, 8)}` : 'Agent'),
+            authorNodeId: cmd.agentNodeId ?? 'agent',
+            votes: cardProps.votes ?? 0,
+            w: s.w ?? 280, h: s.h ?? 160,
+            isAgentCreated: true,
+          },
+        })
+      }
+      agentBridge.emit({ type: 'shape:added', shapeId: id, timestamp: Date.now() })
+      await recordInteraction({ channelId, actorNodeId: cmd.agentNodeId ?? 'agent', type: 'agent_write', payload: { action: 'create', shapeId: id, shapeType: cmd.shape?.type } })
+
+    // ── delete ───────────────────────────────────────────────────────────────
+    } else if (cmd.action === 'delete' && cmd.id) {
+      ed.deleteShapes([cmd.id as ReturnType<typeof createShapeId>])
+      agentBridge.emit({ type: 'shape:removed', shapeId: cmd.id, timestamp: Date.now() })
+      await recordInteraction({ channelId, actorNodeId: cmd.agentNodeId ?? 'agent', type: 'agent_write', payload: { action: 'delete', shapeId: cmd.id } })
+
+    // ── clear ────────────────────────────────────────────────────────────────
+    } else if (cmd.action === 'clear') {
+      ed.selectAll()
+      ed.deleteShapes(ed.getSelectedShapeIds())
+      agentBridge.emit({ type: 'canvas:cleared', timestamp: Date.now() })
+      await recordInteraction({ channelId, actorNodeId: cmd.agentNodeId ?? 'agent', type: 'agent_write', payload: { action: 'clear' } })
+
+    // ── conversation:append ──────────────────────────────────────────────────
+    } else if (cmd.action === 'conversation:append' && cmd.conversationAppend) {
+      const data = cmd.conversationAppend as ConversationAppendData
+      const shapeId = data.conversationId as ReturnType<typeof createShapeId>
+      const existing = ed.getShape(shapeId)
+      if (existing && existing.type === 'syncthink-conversation') {
+        const props = existing.props as ConversationShapeProps
+        const newMsg: ConversationMessage = {
+          messageId: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          senderNodeId: data.conversationId,
+          senderName: data.senderName,
+          content: data.content,
+          isAgentMessage: data.isAgentMessage ?? true,
+          timestamp: Date.now(),
         }
-        return
+        const updatedMessages = [...props.messages, newMsg]
+        ed.updateShape({
+          id: shapeId, type: 'syncthink-conversation',
+          props: { ...props, messages: updatedMessages, h: Math.max(props.h, 120 + updatedMessages.length * 56), isCollapsed: false },
+        })
+        agentBridge.emit({ type: 'conversation:message_appended', conversationId: data.conversationId, messageId: newMsg.messageId, timestamp: Date.now() })
+        await recordInteraction({ channelId, actorNodeId: identity.nodeId, type: 'agent_message', payload: { conversationId: data.conversationId, senderName: data.senderName } })
       }
 
-      // 把 rewindDoc 的画布状态强制写入 editor store（视觉展示，不触发同步）
-      const rewoundRecords = rewoundDoc.getMap<TLRecord>('tldraw_records')
-      const allRewound = [...rewoundRecords.values()]
-      const currentIds = [...ed.store.allRecords()]
-        .map((r) => r.id)
-        .filter((id) => id.startsWith('shape:'))
+    // ── chat ─────────────────────────────────────────────────────────────────
+    } else if (cmd.action === 'chat' && (cmd as { message?: string }).message) {
+      const yArr = chat.chatYArrayRef.current
+      if (yArr) {
+        const agentMsg: ChatMessage = {
+          id: chatMsgId(),
+          authorNodeId: cmd.agentNodeId ?? 'agent',
+          authorName: `Agent:${(cmd.agentNodeId ?? 'agent').slice(0, 8)}`,
+          isAgent: true,
+          content: (cmd as { message?: string }).message ?? '',
+          timestamp: Date.now(),
+        }
+        adapterRef.current?.ydoc.transact(() => { yArr.push([agentMsg]) })
+      }
 
-      ed.store.mergeRemoteChanges(() => {
-        // 移除当前不在 rewind 快照里的 shape
-        const rewoundIds = new Set(allRewound.map((r) => r.id))
-        const toRemove = currentIds.filter((id) => !rewoundIds.has(id))
-        if (toRemove.length > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ed.store.remove(toRemove as any)
-        }
-        // 写入快照里的 shape
-        const shapes = allRewound.filter((r) => r.id.startsWith('shape:'))
-        if (shapes.length > 0) {
-          ed.store.put(shapes)
-        }
+    // ── distill ──────────────────────────────────────────────────────────────
+    } else if (cmd.action === 'distill' && (cmd as { distill?: { summary: string; sourceMessageIds: string[] } }).distill) {
+      const distillData = (cmd as { distill?: { summary: string; sourceMessageIds: string[]; authorNames?: string[] } }).distill!
+      const { x, y } = ed.getViewportPageBounds().center
+      const id = createShapeId()
+      const sourceMessages = chat.chatMessages.filter(m => distillData.sourceMessageIds.includes(m.id))
+      const authorNames = distillData.authorNames ?? [...new Set(sourceMessages.map(m => m.authorName))]
+      ed.createShape({
+        id, type: 'chat-distill-card',
+        x: x + 20 + Math.random() * 60, y: y - 80 + Math.random() * 60,
+        props: { w: 320, h: 170, summary: distillData.summary, sourceMessageIds: distillData.sourceMessageIds, sourceCount: distillData.sourceMessageIds.length, distilledBy: cmd.agentNodeId ?? 'agent', distilledByName: `Agent:${(cmd.agentNodeId ?? 'agent').slice(0, 8)}`, distilledAt: Date.now(), authorNames },
       })
-    },
-    []
-  )
+      const yArr = chat.chatYArrayRef.current
+      if (yArr) {
+        const idSet = new Set(distillData.sourceMessageIds)
+        const all = yArr.toArray() as ChatMessage[]
+        adapterRef.current?.ydoc.transact(() => {
+          all.forEach((m, idx) => {
+            if (idSet.has(m.id) && !m.distilledInto) {
+              yArr.delete(idx, 1)
+              yArr.insert(idx, [{ ...m, distilledInto: id }])
+            }
+          })
+        })
+      }
+      wsClientRef.current?.emitCanvasEvent({ eventType: 'chat:distilled', channelId, cardId: id, timestamp: Date.now() })
+      void recordInteraction({ channelId, actorNodeId: cmd.agentNodeId ?? 'agent', type: 'agent_write', payload: { action: 'distill', cardId: id, count: distillData.sourceMessageIds.length } })
 
+    // ── channel:create ───────────────────────────────────────────────────────
+    } else if (cmd.action === 'channel:create' && cmd.channelCreate) {
+      const req = cmd.channelCreate
+      const VALID_SCENES = ['free', 'meeting-v1', 'research-v1', 'debate-v1', 'knowledge-map-v1', 'local-services-v1', 'chat-v1', 'intel-v1', 'brainstorm-v1', 'okr-v1']
+      const sceneId = VALID_SCENES.includes(req.sceneId ?? '') ? (req.sceneId ?? 'free') : 'free'
+      try {
+        const newChannel = await createChannel(req.name, sceneId, identity, { accessPolicy: req.accessPolicy ?? 'whitelist', allowedCIDRs: req.allowedCIDRs })
+        window.dispatchEvent(new CustomEvent('agent:channel:created', { detail: { requestId: req.requestId, channelId: newChannel.channelId, name: newChannel.name, sceneId: newChannel.sceneId } }))
+        await recordInteraction({ channelId, actorNodeId: cmd.agentNodeId ?? 'agent', type: 'agent_write', payload: { action: 'channel:create', newChannelId: newChannel.channelId, sceneId } })
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        window.dispatchEvent(new CustomEvent('agent:channel:created', { detail: { requestId: req.requestId, channelId: '', name: req.name, sceneId, error: errMsg } }))
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channelId, identity, chat])
+
+  // ── handleMount（场景初始化 + agent:command 监听）─────────────────────────
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
 
-    // 场景初始化
     getChannel(channelId).then(async (ch) => {
-      // Debate 场景：检查本地是否已声明 stance，若无则弹出弹窗
       if (ch?.sceneId === 'debate-v1') {
         const stanceKey = `debate-stance:${channelId}:${identity.nodeId}`
         const saved = await db.get<DebateStance>(stanceKey)
-        if (saved) {
-          setMyStance(saved)
-        } else {
-          setShowStanceModal(true)
-        }
+        if (saved) setMyStance(saved)
+        else setShowStanceModal(true)
       }
 
-      if (ch?.sceneId === 'local-services-v1') {
-        initLocalServicesScene(editor)
-      } else if (ch?.sceneId === 'meeting-v1') {
-        initMeetingScene(editor, {
-          title: ch.name,
-          purpose: (ch.metadata?.purpose as string | undefined) ?? '待填写会议目的',
-        })
-      } else if (ch?.sceneId === 'research-v1') {
-        initResearchScene(editor, {
-          title: ch.name,
-          background: (ch.metadata?.background as string | undefined),
-          ownerNodeId: identity.nodeId,
-          ownerName: identity.displayName,
-        })
-      } else if (ch?.sceneId === 'debate-v1') {
-        initDebateScene(editor, {
-          topic: ch.name,
-          background: (ch.metadata?.background as string | undefined),
-          ownerNodeId: identity.nodeId,
-          ownerName: identity.displayName,
-        })
-      } else if (ch?.sceneId === 'knowledge-map-v1') {
-        initKnowledgeMapScene(editor, {
-          title: ch.name,
-          domain: (ch.metadata?.domain as string | undefined) ?? ch.name,
-          ownerNodeId: identity.nodeId,
-          ownerName: identity.displayName,
-        })
-      } else if (ch?.sceneId === 'chat-v1') {
+      if (ch?.sceneId === 'local-services-v1') initLocalServicesScene(editor)
+      else if (ch?.sceneId === 'meeting-v1') initMeetingScene(editor, { title: ch.name, purpose: (ch.metadata?.purpose as string | undefined) ?? '待填写会议目的' })
+      else if (ch?.sceneId === 'research-v1') initResearchScene(editor, { title: ch.name, background: (ch.metadata?.background as string | undefined), ownerNodeId: identity.nodeId, ownerName: identity.displayName })
+      else if (ch?.sceneId === 'debate-v1') initDebateScene(editor, { topic: ch.name, background: (ch.metadata?.background as string | undefined), ownerNodeId: identity.nodeId, ownerName: identity.displayName })
+      else if (ch?.sceneId === 'knowledge-map-v1') initKnowledgeMapScene(editor, { title: ch.name, domain: (ch.metadata?.domain as string | undefined) ?? ch.name, ownerNodeId: identity.nodeId, ownerName: identity.displayName })
+      else if (ch?.sceneId === 'chat-v1') {
         const ydoc = adapterRef.current?.ydoc
-        if (ydoc) {
-          initChatScene(editor, ydoc, {
-            title: ch.name,
-            ownerNodeId: identity.nodeId,
-          })
-        }
-      } else if (ch?.sceneId === 'intel-v1') {
-        initIntelScene(editor, ch.name)
-      } else if (ch?.sceneId === 'brainstorm-v1') {
-        initBrainstormScene(editor, ch.name)
-      } else if (ch?.sceneId === 'okr-v1') {
-        initOkrScene(editor, ch.name)
+        if (ydoc) initChatScene(editor, ydoc, { title: ch.name, ownerNodeId: identity.nodeId })
       }
+      else if (ch?.sceneId === 'intel-v1') initIntelScene(editor, ch.name)
+      else if (ch?.sceneId === 'brainstorm-v1') initBrainstormScene(editor, ch.name)
+      else if (ch?.sceneId === 'okr-v1') initOkrScene(editor, ch.name)
     })
-
-    // 监听 Agent 指令（来自 BroadcastChannel / localhost:9527）
-    const handleAgentCommand = async (e: Event) => {
-      const cmd = (e as CustomEvent<AgentCommand>).detail
-      const ed = editorRef.current
-      if (!ed) return
-
-      // requiresConfirmation 拦截：暂停执行，等用户确认
-      if (cmd.requiresConfirmation) {
-        setPendingAgentCmd({
-          cmd,
-          prompt: cmd.confirmPrompt ?? `Agent 请求执行 ${cmd.action} 操作，是否允许？`,
-        })
-        return
-      }
-
-      if (cmd.action === 'create' && cmd.shape) {
-        const s = cmd.shape
-        const id = createShapeId()
-        if (s.type === 'text' || s.type === 'sticky') {
-          ed.createShape({
-            id,
-            type: s.type === 'sticky' ? 'note' : 'text',
-            x: s.x,
-            y: s.y,
-            props: {
-              text: s.text ?? '',
-              ...(s.color ? { color: s.color } : {}),
-            },
-          })
-        } else if (s.type === 'geo') {
-          ed.createShape({
-            id,
-            type: 'geo',
-            x: s.x,
-            y: s.y,
-            props: {
-              geo: 'rectangle',
-              w: s.w ?? 200,
-              h: s.h ?? 80,
-              text: s.text ?? '',
-              ...(s.color ? { color: s.color } : {}),
-            },
-          })
-        } else if (s.type === 'syncthink-card') {
-          // Agent 创建 SyncThinkCard（五种类型：idea/decision/issue/action/reference）
-          const cardProps = (s.props ?? {}) as Record<string, unknown>
-          ed.createShape({
-            id,
-            type: 'syncthink-card',
-            x: s.x,
-            y: s.y,
-            props: {
-              cardType: cardProps.cardType ?? 'idea',
-              title: cardProps.title ?? s.text ?? '',
-              body: cardProps.body ?? '',
-              tags: cardProps.tags ?? [],
-              status: cardProps.status ?? 'open',
-              authorName: cardProps.authorName ?? (cmd.agentNodeId ? `Agent:${cmd.agentNodeId.slice(0, 8)}` : 'Agent'),
-              authorNodeId: cmd.agentNodeId ?? 'agent',
-              votes: cardProps.votes ?? 0,
-              w: s.w ?? 280,
-              h: s.h ?? 160,
-              isAgentCreated: true,
-            },
-          })
-        }
-        agentBridge.emit({ type: 'shape:added', shapeId: id, timestamp: Date.now() })
-        // Interaction Log: agent_write (create)
-        await recordInteraction({
-          channelId,
-          actorNodeId: cmd.agentNodeId ?? 'agent',
-          type: 'agent_write',
-          payload: { action: 'create', shapeId: id, shapeType: cmd.shape?.type },
-        })
-      } else if (cmd.action === 'delete' && cmd.id) {
-        ed.deleteShapes([cmd.id as ReturnType<typeof createShapeId>])
-        agentBridge.emit({ type: 'shape:removed', shapeId: cmd.id, timestamp: Date.now() })
-        // Interaction Log: agent_write (delete)
-        await recordInteraction({
-          channelId,
-          actorNodeId: cmd.agentNodeId ?? 'agent',
-          type: 'agent_write',
-          payload: { action: 'delete', shapeId: cmd.id },
-        })
-      } else if (cmd.action === 'clear') {
-        ed.selectAll()
-        ed.deleteShapes(ed.getSelectedShapeIds())
-        agentBridge.emit({ type: 'canvas:cleared', timestamp: Date.now() })
-        // Interaction Log: agent_write (clear)
-        await recordInteraction({
-          channelId,
-          actorNodeId: cmd.agentNodeId ?? 'agent',
-          type: 'agent_write',
-          payload: { action: 'clear' },
-        })
-      } else if (cmd.action === 'conversation:append' && cmd.conversationAppend) {
-        const data = cmd.conversationAppend as ConversationAppendData
-        const shapeId = data.conversationId as ReturnType<typeof createShapeId>
-        const existing = ed.getShape(shapeId)
-        if (existing && existing.type === 'syncthink-conversation') {
-          const props = existing.props as ConversationShapeProps
-          const newMsg: ConversationMessage = {
-            messageId: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            senderNodeId: data.conversationId, // reuse as sender ref
-            senderName: data.senderName,
-            content: data.content,
-            isAgentMessage: data.isAgentMessage ?? true,
-            timestamp: Date.now(),
-          }
-          const updatedMessages = [...props.messages, newMsg]
-          // auto-expand height based on message count (approx 56px per msg)
-          const newH = Math.max(props.h, 120 + updatedMessages.length * 56)
-          ed.updateShape({
-            id: shapeId,
-            type: 'syncthink-conversation',
-            props: {
-              ...props,
-              messages: updatedMessages,
-              h: newH,
-              isCollapsed: false,
-            },
-          })
-          agentBridge.emit({
-            type: 'conversation:message_appended',
-            conversationId: data.conversationId,
-            messageId: newMsg.messageId,
-            timestamp: Date.now(),
-          })
-          // record to Interaction Log
-          await recordInteraction({
-            channelId,
-            actorNodeId: identity.nodeId,
-            type: 'agent_message',
-            payload: { conversationId: data.conversationId, senderName: data.senderName },
-          })
-        } else {
-          console.warn(`[CanvasPage] conversation:append — shape not found or wrong type: ${data.conversationId}`)
-        }
-      } else if (cmd.action === 'chat' && (cmd as { message?: string }).message) {
-        // ── Agent 在消息流里发消息 ────────────────────────────────────────
-        const yArr = chatYArrayRef.current
-        if (yArr) {
-          const agentMsg: ChatMessage = {
-            id: chatMsgId(),
-            authorNodeId: cmd.agentNodeId ?? 'agent',
-            authorName: `Agent:${(cmd.agentNodeId ?? 'agent').slice(0, 8)}`,
-            isAgent: true,
-            content: (cmd as { message?: string }).message ?? '',
-            timestamp: Date.now(),
-          }
-          adapterRef.current?.ydoc.transact(() => { yArr.push([agentMsg]) })
-        }
-      } else if (cmd.action === 'distill' && (cmd as { distill?: { summary: string; sourceMessageIds: string[] } }).distill) {
-        // ── Agent 执行提炼，创建 ChatDistillCard ────────────────────────────
-        const distillData = (cmd as { distill?: { summary: string; sourceMessageIds: string[]; authorNames?: string[] } }).distill!
-        const ed = editorRef.current
-        if (ed) {
-          const { x, y } = ed.getViewportPageBounds().center
-          const id = createShapeId()
-          const sourceMessages = chatMessages.filter(m => distillData.sourceMessageIds.includes(m.id))
-          const authorNames = distillData.authorNames ?? [...new Set(sourceMessages.map(m => m.authorName))]
-
-          ed.createShape({
-            id,
-            type: 'chat-distill-card',
-            x: x + 20 + Math.random() * 60,
-            y: y - 80 + Math.random() * 60,
-            props: {
-              w: 320,
-              h: 170,
-              summary: distillData.summary,
-              sourceMessageIds: distillData.sourceMessageIds,
-              sourceCount: distillData.sourceMessageIds.length,
-              distilledBy: cmd.agentNodeId ?? 'agent',
-              distilledByName: `Agent:${(cmd.agentNodeId ?? 'agent').slice(0, 8)}`,
-              distilledAt: Date.now(),
-              authorNames,
-            },
-          })
-
-          // 标记源消息为已提炼
-          const yArr = chatYArrayRef.current
-          if (yArr) {
-            const idSet = new Set(distillData.sourceMessageIds)
-            const all = yArr.toArray() as ChatMessage[]
-            adapterRef.current?.ydoc.transact(() => {
-              all.forEach((m, idx) => {
-                if (idSet.has(m.id) && !m.distilledInto) {
-                  yArr.delete(idx, 1)
-                  yArr.insert(idx, [{ ...m, distilledInto: id }])
-                }
-              })
-            })
-          }
-
-          wsClientRef.current?.emitCanvasEvent({
-            eventType: 'chat:distilled',
-            channelId,
-            cardId: id,
-            timestamp: Date.now(),
-          })
-          void recordInteraction({
-            channelId,
-            actorNodeId: cmd.agentNodeId ?? 'agent',
-            type: 'agent_write',
-            payload: { action: 'distill', cardId: id, count: distillData.sourceMessageIds.length },
-          })
-        }
-      } else if (cmd.action === 'channel:create' && cmd.channelCreate) {
-        // ── Agent 创建新 Channel（选择场景模式）──────────────────────────
-        const req = cmd.channelCreate
-        const VALID_SCENES = ['free', 'meeting-v1', 'research-v1', 'debate-v1', 'knowledge-map-v1', 'local-services-v1', 'chat-v1', 'intel-v1', 'brainstorm-v1', 'okr-v1']
-        const sceneId = VALID_SCENES.includes(req.sceneId ?? '') ? (req.sceneId ?? 'free') : 'free'
-
-        try {
-          const newChannel = await createChannel(
-            req.name,
-            sceneId,
-            identity,
-            {
-              accessPolicy: req.accessPolicy ?? 'whitelist',
-              allowedCIDRs: req.allowedCIDRs,
-            }
-          )
-          console.log(`[CanvasPage] agent created channel: ${newChannel.channelId} scene=${sceneId}`)
-
-          // 通知 wsClient 结果（wsClient 监听后回传给 agentApi）
-          window.dispatchEvent(new CustomEvent('agent:channel:created', {
-            detail: {
-              requestId: req.requestId,
-              channelId: newChannel.channelId,
-              name: newChannel.name,
-              sceneId: newChannel.sceneId,
-            },
-          }))
-
-          // Interaction Log
-          await recordInteraction({
-            channelId,
-            actorNodeId: cmd.agentNodeId ?? 'agent',
-            type: 'agent_write',
-            payload: { action: 'channel:create', newChannelId: newChannel.channelId, sceneId },
-          })
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err)
-          console.error('[CanvasPage] agent channel:create failed:', errMsg)
-          window.dispatchEvent(new CustomEvent('agent:channel:created', {
-            detail: {
-              requestId: req.requestId,
-              channelId: '',
-              name: req.name,
-              sceneId,
-              error: errMsg,
-            },
-          }))
-        }
-      }
-    }
 
     window.addEventListener('agent:command', handleAgentCommand)
     return () => window.removeEventListener('agent:command', handleAgentCommand)
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channelId, identity, handleAgentCommand])
 
-  // ─── canvas_query 处理（Agent 读取画布状态）──────────────────────────────
-  useEffect(() => {
-    const handleCanvasQuery = async (e: Event) => {
-      const { queryType, requestId, params } = (e as CustomEvent<{
-        queryType: string
-        requestId: string
-        params?: Record<string, unknown>
-      }>).detail
-      const ed = editorRef.current
-      const wsClient = wsClientRef.current
-      if (!wsClient) return
-
-      try {
-        if (queryType === 'get_elements') {
-          const shapes = ed ? ed.getCurrentPageShapes() : []
-          const elements = shapes.map(s => ({
-            id: s.id,
-            type: s.type,
-            x: (s as { x?: number }).x ?? 0,
-            y: (s as { y?: number }).y ?? 0,
-            props: s.props,
-          }))
-          wsClient.sendCanvasQueryResult(requestId, { elements, count: elements.length })
-
-        } else if (queryType === 'get_summary') {
-          const shapes = ed ? ed.getCurrentPageShapes() : []
-          const cardTypes: Record<string, number> = {}
-          let agentCreatedCount = 0
-          for (const s of shapes) {
-            if (s.type === 'syncthink-card') {
-              const ct = (s.props as { cardType?: string }).cardType ?? 'unknown'
-              cardTypes[ct] = (cardTypes[ct] ?? 0) + 1
-              if ((s.props as { isAgentCreated?: boolean }).isAgentCreated) agentCreatedCount++
-            }
-          }
-          wsClient.sendCanvasQueryResult(requestId, {
-            summary: {
-              totalShapes: shapes.length,
-              cardTypes,
-              agentCreatedCount,
-              recentActivity: Date.now(),
-            },
-          })
-
-        } else if (queryType === 'get_scene') {
-          const ch = await getChannel(channelId)
-          const sceneId = ch?.sceneId ?? 'free'
-          const SCENE_NAMES: Record<string, string> = {
-            'free': '自由白板',
-            'meeting-v1': '会议讨论',
-            'research-v1': '共同研究',
-            'debate-v1': '观点擂台',
-            'knowledge-map-v1': '知识地图',
-            'local-services-v1': '本地生活',
-            'chat-v1': '聊天室',
-            'intel-v1': '情报分析',
-            'brainstorm-v1': '头脑风暴',
-            'okr-v1': '目标拆解',
-          }
-          wsClient.sendCanvasQueryResult(requestId, {
-            sceneId,
-            sceneName: SCENE_NAMES[sceneId] ?? sceneId,
-            cardTypeSchema: sceneId,
-          })
-
-        } else if (queryType === 'get_members') {
-          const ch = await getChannel(channelId)
-          const members = ch?.members ?? []
-          wsClient.sendCanvasQueryResult(requestId, {
-            members: members.map(m => ({
-              nodeId: m.nodeId,
-              displayName: m.displayName,
-              role: m.role,
-              isOnline: m.isOnline,
-              joinedAt: m.joinedAt,
-            })),
-            onlineCount: members.filter(m => m.isOnline).length,
-          })
-
-        } else if (queryType === 'get_interactions') {
-          const limit = typeof params?.limit === 'number' ? params.limit : 50
-          const actorNodeId = typeof params?.actorNodeId === 'string' ? params.actorNodeId : undefined
-          const all = await getInteractions(channelId)
-          const filtered = actorNodeId ? all.filter(r => r.actorNodeId === actorNodeId) : all
-          const sliced = filtered.slice(0, limit)
-          wsClient.sendCanvasQueryResult(requestId, {
-            interactions: sliced,
-            count: sliced.length,
-          })
-
-        } else {
-          wsClient.sendCanvasQueryResult(requestId, undefined, `unknown queryType: ${queryType}`)
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        wsClient.sendCanvasQueryResult(requestId, undefined, msg)
-      }
-    }
-
-    window.addEventListener('syncthink:canvas_query', handleCanvasQuery)
-    return () => window.removeEventListener('syncthink:canvas_query', handleCanvasQuery)
-  }, [channelId])
-
-  // ─── 卡片投票处理 ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    const handleCardVote = async (e: Event) => {
-      const { shapeId, currentVotes } = (e as CustomEvent<{ shapeId: string; currentVotes: number }>).detail
-      const ed = editorRef.current
-      if (!ed) return
-      const tlId = shapeId as ReturnType<typeof createShapeId>
-      const shape = ed.getShape(tlId)
-      if (!shape || shape.type !== 'syncthink-card') return
-
-      // 更新 votes + hasVoted
-      ed.updateShape({
-        id: tlId,
-        type: 'syncthink-card',
-        props: {
-          votes: currentVotes + 1,
-          hasVoted: true,
-        },
-      })
-
-      // Interaction Log: card_voted
-      await recordInteraction({
-        channelId,
-        actorNodeId: identity.nodeId,
-        targetNodeId: (shape.props as { authorNodeId?: string }).authorNodeId,
-        type: 'card_voted',
-        payload: { shapeId, newVotes: currentVotes + 1 },
-      })
-    }
-
-    window.addEventListener('syncthink:card_vote', handleCardVote)
-    return () => window.removeEventListener('syncthink:card_vote', handleCardVote)
-  }, [channelId, identity.nodeId])
-
-  // ─── 卡片状态切换处理（spec 7.5.4: card_confirmed / action_completed）──────
-  useEffect(() => {
-    const handleStatusChange = async (e: Event) => {
-      const { shapeId, prevStatus, nextStatus, cardType, authorNodeId } = (e as CustomEvent<{
-        shapeId: string
-        prevStatus: string
-        nextStatus: string
-        cardType: string
-        authorNodeId?: string
-      }>).detail
-      const ed = editorRef.current
-      if (!ed) return
-      const tlId = shapeId as ReturnType<typeof createShapeId>
-      // 更新 shape status
-      ed.updateShape({
-        id: tlId,
-        type: 'syncthink-card',
-        props: { status: nextStatus as 'open' | 'resolved' | 'archived' },
-      })
-      // spec 7.5.4: decision 卡片被 resolved → card_confirmed（认可他人决议）
-      if (cardType === 'decision' && nextStatus === 'resolved' && authorNodeId !== identity.nodeId) {
-        await recordInteraction({
-          channelId,
-          actorNodeId: identity.nodeId,
-          targetNodeId: authorNodeId,
-          type: 'card_confirmed',
-          payload: { shapeId, prevStatus, nextStatus },
-        })
-      }
-      // spec 7.5.4: action 卡片状态 → resolved → action_completed
-      if (cardType === 'action' && nextStatus === 'resolved') {
-        await recordInteraction({
-          channelId,
-          actorNodeId: identity.nodeId,
-          targetNodeId: authorNodeId,
-          type: 'action_completed',
-          payload: { shapeId, prevStatus, nextStatus },
-        })
-      }
-    }
-    window.addEventListener('syncthink:card_status_change', handleStatusChange)
-    return () => window.removeEventListener('syncthink:card_status_change', handleStatusChange)
-  }, [channelId, identity.nodeId])
-
-  // ---- 增长场景：rabbit-hole 分裂（Research 场景）— 真实创建子 Channel ----
-  useEffect(() => {
-    const handleSplit = async (e: Event) => {
-      const { shapeId, title, expertise } = (e as CustomEvent).detail as {
-        shapeId: string
-        title: string
-        expertise: string[]
-      }
-      const ed = editorRef.current
-      if (!ed) return
-
-      const tlShapeId = shapeId as ReturnType<typeof createShapeId>
-      const shape = ed.getShape(tlShapeId)
-      if (!shape) return
-
-      try {
-        // 1. 真实创建子 Channel（research-v1 场景，白名单策略）
-        const subChannel = await createChannel(
-          title || '子课题研究',
-          'research-v1',
-          identity,
-          { accessPolicy: 'whitelist' }
-        )
-
-        // 2. 标记原 rabbit-hole 卡为 hasSpawned，写入真实 channelId
-        ed.updateShape({
-          id: tlShapeId,
-          type: 'research-card',
-          props: {
-            ...(shape.props as Record<string, unknown>),
-            hasSpawned: true,
-            spawnedChannelId: subChannel.channelId,
-          },
-        })
-
-        // 3. 在原位置旁边创建跨 Channel 引用锚点
-        ed.createShape({
-          id: createShapeId(),
-          type: 'text',
-          x: shape.x + (shape.props as { w: number }).w + 20,
-          y: shape.y,
-          props: {
-            text: `→ 子 Channel: ${subChannel.channelId}\n主题: ${title}\n所需: ${expertise.join(', ')}`,
-            size: 's',
-            color: 'violet',
-            w: 200,
-          },
-        })
-
-        // 4. 录 Interaction
-        void recordInteraction({
-          channelId,
-          actorNodeId: identity.nodeId,
-          type: 'agent_write',
-          payload: { subAction: 'rabbit_hole_split', newChannelId: subChannel.channelId, title },
-        })
-
-        // 5. 弹出跳转确认弹窗
-        setSpawnedChannel({ channelId: subChannel.channelId, title: title || '子课题研究' })
-      } catch (err) {
-        console.error('[CanvasPage] rabbit-hole split failed:', err)
-      }
-    }
-    window.addEventListener('research:split-channel', handleSplit)
-    return () => window.removeEventListener('research:split-channel', handleSplit)
-  }, [channelId, identity])
-
-  // ---- 增长场景：gap 填充申请（KnowledgeMap 场景）----
-  useEffect(() => {
-    const handleGapApply = (e: Event) => {
-      const { shapeId, description, requiredExpertise } = (e as CustomEvent).detail
-      const ed = editorRef.current
-      if (!ed) return
-      // 在 gap 卡旁边放一个申请提示（实际场景会弹窗/发消息给 owner）
-      const shape = ed.getShape(shapeId)
-      if (!shape) return
-      ed.createShape({
-        id: createShapeId(),
-        type: 'text',
-        x: shape.x + (shape as { props: { w: number } }).props.w + 16,
-        y: shape.y,
-        props: {
-          text: `🙋 ${identity.displayName} 申请填充\n「${description}」\n所需：${requiredExpertise}`,
-          size: 's',
-          color: 'pink',
-          w: 180,
-        },
-      })
-      void recordInteraction({
-        channelId,
-        actorNodeId: identity.nodeId,
-        type: 'card_created',
-        payload: { subAction: 'gap_fill_application', shapeId },
-      })
-    }
-    window.addEventListener('knowledge-map:apply-fill-gap', handleGapApply)
-    return () => window.removeEventListener('knowledge-map:apply-fill-gap', handleGapApply)
-  }, [channelId, identity])
-
-  // ---- 增长场景：dispute 派生 Debate Channel（KnowledgeMap 场景）----
-  useEffect(() => {
-    const handleForkDebate = (e: Event) => {
-      const { shapeId, description } = (e as CustomEvent).detail
-      const ed = editorRef.current
-      if (!ed) return
-      const shape = ed.getShape(shapeId)
-      if (!shape) return
-      const newDebateChannelId = `debate-${Date.now().toString(36)}`
-      // 标记 dispute 卡为 hasDebateChannel
-      ed.updateShape({
-        id: shapeId,
-        type: 'knowledge-map-card',
-        props: {
-          ...(shape.props as Record<string, unknown>),
-          hasDebateChannel: true,
-          debateChannelId: newDebateChannelId,
-        },
-      })
-      // 在旁边放跨 Channel 引用锚点
-      ed.createShape({
-        id: createShapeId(),
-        type: 'text',
-        x: shape.x + (shape as { props: { w: number } }).props.w + 16,
-        y: shape.y,
-        props: {
-          text: `→ Debate Channel: ${newDebateChannelId}\n辩题: ${description}`,
-          size: 's',
-          color: 'orange',
-          w: 200,
-        },
-      })
-      void recordInteraction({
-        channelId,
-        actorNodeId: identity.nodeId,
-        type: 'agent_write',
-        payload: { subAction: 'dispute_fork_debate', newDebateChannelId, description },
-      })
-    }
-    window.addEventListener('knowledge-map:fork-debate', handleForkDebate)
-    return () => window.removeEventListener('knowledge-map:fork-debate', handleForkDebate)
-  }, [channelId, identity])
-
-  // ---- 创建 ConversationNode ----
+  // ── 创建节点/卡片 ─────────────────────────────────────────────────────────
   const handleCreateConversation = useCallback(() => {
     const ed = editorRef.current
     if (!ed) return
     const { x, y } = ed.getViewportPageBounds().center
-    const id = createShapeId()
     ed.createShape({
-      id,
-      type: 'syncthink-conversation',
-      x: x - 160,
-      y: y - 100,
-      props: {
-        w: 320,
-        h: 200,
-        initiatorNodeId: identity.nodeId,
-        responderNodeId: '',
-        displayName: `对话 #${Date.now().toString().slice(-4)}`,
-        messages: [],
-        isCollapsed: false,
-        status: 'active',
-        authorNodeId: identity.nodeId,
-        startedAt: Date.now(),
-        outputCardIds: [],
-      },
+      id: createShapeId(), type: 'syncthink-conversation',
+      x: x - 160, y: y - 100,
+      props: { w: 320, h: 200, initiatorNodeId: identity.nodeId, responderNodeId: '', displayName: `对话 #${Date.now().toString().slice(-4)}`, messages: [], isCollapsed: false, status: 'active', authorNodeId: identity.nodeId, startedAt: Date.now(), outputCardIds: [] },
     })
   }, [identity])
 
-  // ---- 创建 AgentNode ----
   const handleCreateAgent = useCallback(() => {
     const ed = editorRef.current
     if (!ed) return
     const { x, y } = ed.getViewportPageBounds().center
-    const id = createShapeId()
     ed.createShape({
-      id,
-      type: 'syncthink-agent',
-      x: x - 80,
-      y: y - 60,
-      props: {
-        w: 160,
-        h: 120,
-        agentNodeId: `agent-${identity.nodeId.slice(0, 8)}`,
-        displayName: `${identity.displayName}的 Agent 🤖`,
-        ownerNodeId: identity.nodeId,
-        color: deriveAvatarColor(identity.nodeId),
-        status: 'idle',
-        currentTask: '',
-        lastActionAt: Date.now(),
-        isMinimized: false,
-        stats: { cardCreated: 0, suggestionAccepted: 0, suggestionRejected: 0 },
-      },
+      id: createShapeId(), type: 'syncthink-agent',
+      x: x - 80, y: y - 60,
+      props: { w: 160, h: 120, agentNodeId: `agent-${identity.nodeId.slice(0, 8)}`, displayName: `${identity.displayName}的 Agent 🤖`, ownerNodeId: identity.nodeId, color: deriveAvatarColor(identity.nodeId), status: 'idle', currentTask: '', lastActionAt: Date.now(), isMinimized: false, stats: { cardCreated: 0, suggestionAccepted: 0, suggestionRejected: 0 } },
     })
   }, [identity])
 
-  // ---- 创建 SyncThinkCard ----
   const handleCreateCard = useCallback((cardType: CardType) => {
     const ed = editorRef.current
     if (!ed) return
     const { x, y } = ed.getViewportPageBounds().center
-    const id = createShapeId()
     const offset = (Math.random() - 0.5) * 60
     ed.createShape({
-      id,
-      type: 'syncthink-card',
-      x: x - 140 + offset,
-      y: y - 70 + offset,
+      id: createShapeId(), type: 'syncthink-card',
+      x: x - 140 + offset, y: y - 70 + offset,
       props: {
-        w: 280,
-        h: 140,
-        cardType,
+        w: 280, h: 140, cardType,
         title: `新${cardType === 'idea' ? '想法' : cardType === 'decision' ? '决策' : cardType === 'issue' ? '问题' : cardType === 'action' ? '行动' : '引用'}`,
-        body: '',
-        authorNodeId: identity.nodeId,
-        authorName: identity.displayName,
-        createdAt: Date.now(),
-        status: 'open',
-        tags: [],
-        votes: 0,
-        isExpanded: true,
+        body: '', authorNodeId: identity.nodeId, authorName: identity.displayName, createdAt: Date.now(), status: 'open', tags: [], votes: 0, isExpanded: true,
       },
     })
     setShowCardMenu(false)
-    recordInteraction({
-      channelId,
-      actorNodeId: identity.nodeId,
-      type: 'card_created',
-      payload: { cardType },
-    })
+    recordInteraction({ channelId, actorNodeId: identity.nodeId, type: 'card_created', payload: { cardType } })
   }, [identity, channelId])
 
-  // ── chat-v1：发送消息 ─────────────────────────────────────────────────────
-  const handleChatSend = useCallback((content: string) => {
-    const yArr = chatYArrayRef.current
-    if (!yArr) return
-    const msg: ChatMessage = {
-      id: chatMsgId(),
-      authorNodeId: identity.nodeId,
-      authorName: identity.displayName,
-      isAgent: false,
-      content,
-      timestamp: Date.now(),
-    }
-    const adapter = adapterRef.current
-    if (adapter) {
-      adapter.ydoc.transact(() => {
-        yArr.push([msg])
-      })
-    }
-    // 通知 /agent/watch 订阅者有新消息
-    wsClientRef.current?.emitCanvasEvent({
-      eventType: 'chat:message',
-      channelId,
-      messageId: msg.id,
-      authorNodeId: msg.authorNodeId,
-      authorName: msg.authorName,
-      content: msg.content,
-      timestamp: msg.timestamp,
-    })
-    // Interaction Log
-    void recordInteraction({
-      channelId,
-      actorNodeId: identity.nodeId,
-      type: 'card_created',
-      payload: { subAction: 'chat_message_sent' },
-    })
-  }, [identity, channelId])
+  // ── Agent 写入确认：确认/拒绝 ──────────────────────────────────────────────
+  const handleAgentConfirm = useCallback(async () => {
+    if (!pendingAgentCmd) return
+    const approvedCmd = { ...pendingAgentCmd.cmd, requiresConfirmation: false }
+    await recordInteraction({ channelId, actorNodeId: identity.nodeId, type: 'agent_confirm', payload: { action: pendingAgentCmd.cmd.action } })
+    await recordInteraction({ channelId, actorNodeId: identity.nodeId, targetNodeId: pendingAgentCmd.cmd.agentNodeId, type: 'agent_assisted', payload: { action: pendingAgentCmd.cmd.action } })
+    setPendingAgentCmd(null)
+    window.dispatchEvent(new CustomEvent('agent:command', { detail: approvedCmd }))
+  }, [pendingAgentCmd, channelId, identity.nodeId])
 
-  // ── chat-v1：触发提炼 ────────────────────────────────────────────────────
-  const handleDistillRequest = useCallback((selectedIds: string[]) => {
-    // 通知 /agent/watch 订阅者（通过 wsClient → signaling → agentApi → watchers）
-    wsClientRef.current?.emitCanvasEvent({
-      eventType: 'chat:distill_request',
-      channelId,
-      selectedMessageIds: selectedIds,
-      requestedBy: identity.nodeId,
-      timestamp: Date.now(),
-    })
+  const handleAgentReject = useCallback(async () => {
+    if (!pendingAgentCmd) return
+    await recordInteraction({ channelId, actorNodeId: identity.nodeId, type: 'agent_reject', payload: { action: pendingAgentCmd.cmd.action } })
+    await recordInteraction({ channelId, actorNodeId: identity.nodeId, targetNodeId: pendingAgentCmd.cmd.agentNodeId, type: 'agent_ignored', payload: { action: pendingAgentCmd.cmd.action } })
+    setPendingAgentCmd(null)
+  }, [pendingAgentCmd, channelId, identity.nodeId])
 
-    // 若无 Agent 在线，做本地文本提炼（降级）
-    const selected = chatMessages.filter(m => selectedIds.includes(m.id))
-    if (selected.length === 0) return
+  // ── 软删除确认 ─────────────────────────────────────────────────────────────
+  const handleDeleteConfirm = useCallback(() => {
+    if (!pendingDelete) return
+    pendingDelete.confirm()
+    recordInteraction({ channelId, actorNodeId: identity.nodeId, type: 'card_deleted', payload: { count: pendingDelete.shapeIds?.length ?? 1 } })
+    setPendingDelete(null)
+  }, [pendingDelete, channelId, identity.nodeId])
 
-    const ed = editorRef.current
-    if (!ed) return
+  const handleDeleteCancel = useCallback(() => {
+    pendingDelete?.cancel()
+    setPendingDelete(null)
+  }, [pendingDelete])
 
-    const { x, y } = ed.getViewportPageBounds().center
-    const id = createShapeId()
-    const authorNames = [...new Set(selected.map(m => m.authorName))]
-
-    ed.createShape({
-      id,
-      type: 'chat-distill-card',
-      x: x + 20 + Math.random() * 40,
-      y: y - 80 + Math.random() * 40,
-      props: {
-        w: 300,
-        h: 160,
-        summary: selected.map(m => m.content).join('\n').slice(0, 200),
-        sourceMessageIds: selectedIds,
-        sourceCount: selected.length,
-        distilledBy: identity.nodeId,
-        distilledByName: identity.displayName,
-        distilledAt: Date.now(),
-        authorNames,
-      },
-    })
-
-    // 标记源消息为已提炼
-    const yArr = chatYArrayRef.current
-    if (yArr) {
-      const idSet = new Set(selectedIds)
-      const all = yArr.toArray() as ChatMessage[]
-      adapterRef.current?.ydoc.transact(() => {
-        all.forEach((m, idx) => {
-          if (idSet.has(m.id) && !m.distilledInto) {
-            yArr.delete(idx, 1)
-            yArr.insert(idx, [{ ...m, distilledInto: id }])
-          }
-        })
-      })
-    }
-
-    void recordInteraction({
-      channelId,
-      actorNodeId: identity.nodeId,
-      type: 'agent_write',
-      payload: { subAction: 'chat_local_distill', count: selected.length },
-    })
-  }, [chatMessages, identity, channelId])
-
-  // ── chat-v1：跳转到画布卡片 ───────────────────────────────────────────────
-  const handleJumpToCard = useCallback((cardId: string) => {
-    const ed = editorRef.current
-    if (!ed) return
-    const shapeId = cardId as ReturnType<typeof createShapeId>
-    const shape = ed.getShape(shapeId)
-    if (shape) {
-      ed.select(shapeId)
-      ed.zoomToSelection({ animation: { duration: 400 } })
-    }
-  }, [])
-
-  // ---- 邀请链接 ----
-  const [inviteUrl, setInviteUrl] = useState(
-    `${window.location.origin}${window.location.pathname}?channel=${channelId}`
-  )
-
-  // 打开邀请弹窗时动态生成 inviteCode（whitelist 策略下）
-  const handleOpenInvite = useCallback(async () => {
-    const channel = await getChannel(channelId)
-    const policy = channel?.accessPolicy ?? 'whitelist'
-    const isOwner = channel?.ownerNodeId === identity.nodeId
-
-    setInviteIsOwner(isOwner)
-    setRevokeConfirm(false)
-
-    if (policy === 'whitelist' && isOwner) {
-      // 生成带签名的 inviteCode
-      const { generateInviteCode } = await import('../channel/channel')
-      const encoded = await generateInviteCode(channelId, identity.nodeId)
-      setInviteUrl(
-        `${window.location.origin}${window.location.pathname}?channel=${channelId}&invite=${encoded}`
-      )
-    } else {
-      // open/lan-only/cidr：不需要邀请码，直接拼 channel
-      setInviteUrl(`${window.location.origin}${window.location.pathname}?channel=${channelId}`)
-    }
-
-    setShowInvite(true)
-  }, [channelId, identity.nodeId])
-
-  // 吊销全部邀请码（owner only）
-  const handleRevokeAll = useCallback(async () => {
-    if (!revokeConfirm) {
-      setRevokeConfirm(true)
-      return
-    }
-    setRevoking(true)
-    try {
-      await revokeAllInviteCodes(channelId)
-      // 吊销后重新生成新链接（新 token 不受 '*' 影响，因为 '*' 是旧链接吊销标记）
-      const { generateInviteCode } = await import('../channel/channel')
-      const encoded = await generateInviteCode(channelId, identity.nodeId)
-      setInviteUrl(
-        `${window.location.origin}${window.location.pathname}?channel=${channelId}&invite=${encoded}`
-      )
-      setRevokeConfirm(false)
-    } finally {
-      setRevoking(false)
-    }
-  }, [channelId, identity.nodeId, revokeConfirm])
-
-  const handleCopyInvite = useCallback(() => {
-    navigator.clipboard.writeText(inviteUrl).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }, [inviteUrl])
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-screen bg-st-bg">
       {/* 顶部状态栏 */}
       <div className="flex items-center justify-between px-4 py-2 bg-st-surface border-b border-st-border z-10 shrink-0">
         <div className="flex items-center gap-3">
-          <button
-            onClick={onBack}
-            className="text-gray-400 hover:text-white transition-colors text-sm"
-          >
+          <button onClick={onBack} className="text-gray-400 hover:text-white transition-colors text-sm">
             ← 返回
           </button>
           <div className="w-px h-4 bg-st-border" />
-          <span className="text-st-cyan font-mono text-sm">
-            ⟁ {channelId}
-          </span>
-          {/* 邀请按钮 */}
+          <span className="text-st-cyan font-mono text-sm">⟁ {channelId}</span>
           <button
-            onClick={handleOpenInvite}
+            onClick={invite.openInvite}
             className="text-xs px-2 py-0.5 rounded border border-st-border text-gray-400 hover:text-white hover:border-gray-500 transition-colors"
           >
             🔗 邀请
@@ -1448,18 +528,10 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
             )}
           </div>
 
-          {/* 对话节点 */}
-          <button
-            onClick={handleCreateConversation}
-            className="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
-          >
+          <button onClick={handleCreateConversation} className="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
             + 对话节点
           </button>
-          {/* Agent节点 */}
-          <button
-            onClick={handleCreateAgent}
-            className="text-xs px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white transition-colors"
-          >
+          <button onClick={handleCreateAgent} className="text-xs px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white transition-colors">
             + Agent节点
           </button>
 
@@ -1467,9 +539,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           <button
             onClick={handleToggleReview}
             className={`text-xs px-2.5 py-1 rounded border transition-colors ${
-              isReview
-                ? 'bg-amber-500 border-amber-400 text-black font-bold'
-                : 'border-st-border text-gray-400 hover:text-white'
+              isReview ? 'bg-amber-500 border-amber-400 text-black font-bold' : 'border-st-border text-gray-400 hover:text-white'
             }`}
           >
             {isReview ? '📼 Review' : '🔴 Live'}
@@ -1477,116 +547,51 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
           {/* 同步状态 */}
           <div className="flex items-center gap-1.5">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                syncReady ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'
-              }`}
-            />
-            <span className="text-xs text-gray-400">
-              {syncReady ? '已同步' : '加载中…'}
-            </span>
+            <div className={`w-2 h-2 rounded-full ${syncReady ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'}`} />
+            <span className="text-xs text-gray-400">{syncReady ? '已同步' : '加载中…'}</span>
           </div>
 
           {/* 在线人数 */}
           <div className="flex items-center gap-1.5">
             <div className="w-2 h-2 rounded-full bg-st-cyan" />
-            <span className="text-xs text-gray-400">
-              {peers + 1} 在线
-            </span>
+            <span className="text-xs text-gray-400">{peers + 1} 在线</span>
           </div>
 
           {/* 当前用户 */}
           <div className="flex items-center gap-1.5">
-            <div
-              className="w-3 h-3 rounded-full"
-              style={{ background: identity.avatarColor }}
-            />
+            <div className="w-3 h-3 rounded-full" style={{ background: identity.avatarColor }} />
             <span className="text-xs text-gray-300">{identity.displayName}</span>
           </div>
         </div>
       </div>
 
       {/* 邀请弹窗 */}
-      {showInvite && (
-        <div
-          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
-          onClick={() => setShowInvite(false)}
-        >
-          <div
-            className="bg-st-surface border border-st-border rounded-xl p-6 w-[420px] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <div className="text-sm font-semibold text-white">邀请加入 Channel</div>
-              <button onClick={() => setShowInvite(false)} className="text-gray-500 hover:text-white text-lg">✕</button>
-            </div>
-            <div className="text-xs text-gray-400 mb-3">发送以下链接，对方打开即可直接加入：</div>
-            <div className="flex gap-2">
-              <input
-                readOnly
-                value={inviteUrl}
-                className="flex-1 px-3 py-2 bg-st-bg border border-st-border rounded-lg text-xs font-mono text-gray-300 outline-none select-all"
-                onFocus={(e) => e.target.select()}
-              />
-              <button
-                onClick={handleCopyInvite}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  copied
-                    ? 'bg-green-600 text-white'
-                    : 'bg-st-indigo hover:bg-indigo-500 text-white'
-                }`}
-              >
-                {copied ? '✓ 已复制' : '复制'}
-              </button>
-            </div>
-            <div className="mt-3 text-xs text-gray-600 font-mono">
-              Channel ID：{channelId}
-            </div>
-            {/* 吊销按钮（owner only） */}
-            {inviteIsOwner && (
-              <div className="mt-4 pt-3 border-t border-st-border">
-                {revokeConfirm ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-amber-400 flex-1">确认吊销？所有旧邀请码将立即失效。</span>
-                    <button
-                      onClick={handleRevokeAll}
-                      disabled={revoking}
-                      className="text-xs px-3 py-1 rounded bg-red-600 hover:bg-red-500 text-white transition-colors disabled:opacity-50"
-                    >
-                      {revoking ? '处理中…' : '确认吊销'}
-                    </button>
-                    <button
-                      onClick={() => setRevokeConfirm(false)}
-                      className="text-xs px-3 py-1 rounded border border-st-border text-gray-400 hover:text-white transition-colors"
-                    >
-                      取消
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleRevokeAll}
-                    className="text-xs text-red-400 hover:text-red-300 transition-colors"
-                  >
-                    🚫 吊销所有旧邀请码
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+      {invite.showInvite && (
+        <InviteDialog
+          channelId={channelId}
+          inviteUrl={invite.inviteUrl}
+          copied={invite.copied}
+          isOwner={invite.inviteIsOwner}
+          revokeConfirm={invite.revokeConfirm}
+          revoking={invite.revoking}
+          onCopy={invite.copyInvite}
+          onRevokeAll={invite.revokeAll}
+          onCancelRevoke={() => invite.setRevokeConfirm(false)}
+          onClose={invite.closeInvite}
+        />
       )}
 
-      {/* 主内容区（chat-v1 左右分栏，其他场景全屏画布） */}
+      {/* 主内容区 */}
       <div className="flex-1 flex relative overflow-hidden">
         {/* chat-v1：左侧消息流面板 */}
-        {isChat && (
+        {chat.isChat && (
           <ChatPanel
-            messages={chatMessages}
+            messages={chat.chatMessages}
             myNodeId={identity.nodeId}
             myName={identity.displayName}
-            onSend={handleChatSend}
-            onDistillRequest={handleDistillRequest}
-            onJumpToCard={handleJumpToCard}
+            onSend={chat.sendMessage}
+            onDistillRequest={chat.requestDistill}
+            onJumpToCard={chat.jumpToCard}
           />
         )}
 
@@ -1594,17 +599,12 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         <div className="flex-1 relative">
           {!syncReady && (
             <div className="absolute inset-0 flex items-center justify-center bg-st-bg z-10">
-              <div className="text-st-cyan text-sm font-mono animate-pulse">
-                Loading canvas…
-              </div>
+              <div className="text-st-cyan text-sm font-mono animate-pulse">Loading canvas…</div>
             </div>
           )}
-          {/* Review 模式：只读蒙层，防止误操作 */}
+          {/* Review 模式：只读蒙层 */}
           {isReview && rewindDoc && (
-            <div
-              className="absolute inset-0 z-20 pointer-events-none"
-              style={{ background: 'rgba(0,0,0,0.08)', mixBlendMode: 'multiply' }}
-            >
+            <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: 'rgba(0,0,0,0.08)', mixBlendMode: 'multiply' }}>
               <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-amber-500/90 text-black text-xs font-bold px-3 py-1 rounded-full pointer-events-none select-none">
                 📼 历史回放模式 — 只读
               </div>
@@ -1630,264 +630,54 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         />
       )}
 
-      {/* P4: 软删除确认弹窗 */}
+      {/* 软删除确认弹窗 */}
       {pendingDelete && (
-        <div
-          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
-          onClick={() => {
-            pendingDelete.cancel()
-            setPendingDelete(null)
-          }}
-        >
-          <div
-            className="bg-st-surface border border-red-500/60 rounded-xl p-6 w-[400px] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <span className="text-2xl">⚠️</span>
-              <div>
-                <div className="text-sm font-semibold text-white">批量删除确认</div>
-                <div className="text-xs text-gray-400 mt-0.5">
-                  即将删除 {pendingDelete.shapeIds.length} 个元素，此操作会同步到所有在线成员
-                </div>
-              </div>
-            </div>
-            <div className="bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2 mb-4">
-              <div className="text-xs text-red-300 font-mono">
-                ⚠️ CRDT 删除不可逆。确认后其他 peer 也会失去这些内容。
-              </div>
-            </div>
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={() => {
-                  pendingDelete.cancel()
-                  setPendingDelete(null)
-                }}
-                className="px-4 py-2 text-sm rounded-lg border border-st-border text-gray-300 hover:text-white hover:border-gray-400 transition-colors"
-              >
-                取消（保留内容）
-              </button>
-              <button
-                onClick={() => {
-                  pendingDelete.confirm()
-                  setPendingDelete(null)
-                  // Interaction Log: card_deleted（软删除确认）
-                  recordInteraction({
-                    channelId,
-                    actorNodeId: identity.nodeId,
-                    type: 'card_deleted',
-                    payload: { count: pendingDelete.shapeIds?.length ?? 1 },
-                  })
-                }}
-                className="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
-              >
-                确认删除
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDeleteDialog
+          pending={pendingDelete}
+          channelId={channelId}
+          actorNodeId={identity.nodeId}
+          onConfirm={handleDeleteConfirm}
+          onCancel={handleDeleteCancel}
+        />
       )}
 
       {/* Agent 写入确认弹窗 */}
       {pendingAgentCmd && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999,
-        }}>
-          <div style={{
-            background: '#1a1f2e', border: '1px solid #2a3040',
-            borderRadius: 12, padding: '24px 28px', maxWidth: 400, width: '90%',
-          }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0', marginBottom: 8 }}>
-              🤖 Agent 请求确认
-            </div>
-            <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 20, lineHeight: 1.6 }}>
-              {pendingAgentCmd.prompt}
-            </div>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button
-                onClick={async () => {
-                  await recordInteraction({
-                    channelId,
-                    actorNodeId: identity.nodeId,
-                    type: 'agent_reject',
-                    payload: { action: pendingAgentCmd.cmd.action, prompt: pendingAgentCmd.prompt },
-                  })
-                  // spec 7.5.4: agent_ignored — Agent 建议未被采用
-                  await recordInteraction({
-                    channelId,
-                    actorNodeId: identity.nodeId,
-                    targetNodeId: pendingAgentCmd.cmd.agentNodeId,
-                    type: 'agent_ignored',
-                    payload: { action: pendingAgentCmd.cmd.action },
-                  })
-                  setPendingAgentCmd(null)
-                }}
-                style={{
-                  padding: '7px 18px', background: 'transparent',
-                  border: '1px solid #374151', borderRadius: 7,
-                  color: '#94a3b8', cursor: 'pointer', fontSize: 13,
-                }}
-              >
-                拒绝
-              </button>
-              <button
-                onClick={async () => {
-                  const approvedCmd = { ...pendingAgentCmd.cmd, requiresConfirmation: false }
-                  await recordInteraction({
-                    channelId,
-                    actorNodeId: identity.nodeId,
-                    type: 'agent_confirm',
-                    payload: { action: pendingAgentCmd.cmd.action, prompt: pendingAgentCmd.prompt },
-                  })
-                  // spec 7.5.4: agent_assisted — Agent 建议被采用
-                  await recordInteraction({
-                    channelId,
-                    actorNodeId: identity.nodeId,
-                    targetNodeId: pendingAgentCmd.cmd.agentNodeId,
-                    type: 'agent_assisted',
-                    payload: { action: pendingAgentCmd.cmd.action },
-                  })
-                  setPendingAgentCmd(null)
-                  // 重新 dispatch（不带 requiresConfirmation，直接执行）
-                  window.dispatchEvent(new CustomEvent('agent:command', { detail: approvedCmd }))
-                }}
-                style={{
-                  padding: '7px 18px', background: '#4f46e5',
-                  border: 'none', borderRadius: 7,
-                  color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600,
-                }}
-              >
-                确认执行
-              </button>
-            </div>
-          </div>
-        </div>
+        <AgentConfirmDialog
+          cmd={pendingAgentCmd.cmd}
+          prompt={pendingAgentCmd.prompt}
+          onConfirm={handleAgentConfirm}
+          onReject={handleAgentReject}
+        />
       )}
 
-      {/* ── Debate: stance 声明弹窗 ─────────────────────────────────────────── */}
+      {/* Debate stance 弹窗 */}
       {showStanceModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div
-            className="bg-st-surface border border-[#6366f166] rounded-xl p-7 w-[420px] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* 标题 */}
-            <div className="text-center mb-5">
-              <div className="text-2xl mb-1">⚖️</div>
-              <div className="text-base font-semibold text-white">声明你的立场</div>
-              <div className="text-xs text-gray-400 mt-1">
-                进入观点擂台前，请选择你的初始立场。<br />
-                立场将显示在你发表的每一张卡片上。
-              </div>
-            </div>
-
-            {/* 三个立场按钮 */}
-            <div className="flex flex-col gap-3 mb-5">
-              {(['for', 'against', 'neutral'] as DebateStance[]).map((s) => {
-                const cfg = stanceConfig(s)
-                return (
-                  <button
-                    key={s}
-                    onClick={() => setMyStance(s)}
-                    className={`flex items-center gap-4 px-4 py-3 rounded-xl border transition-all ${
-                      myStance === s
-                        ? 'border-[#6366f1] bg-[#6366f115] shadow-[0_0_12px_#6366f133]'
-                        : 'border-st-border bg-st-bg hover:border-gray-500'
-                    }`}
-                  >
-                    <span style={{ fontSize: 22 }}>{cfg.emoji}</span>
-                    <div className="text-left flex-1">
-                      <div className="text-sm font-medium text-white">{cfg.label}</div>
-                      <div className="text-xs text-gray-500 mt-0.5">
-                        {s === 'for' && '支持命题，将从正方视角发表论点'}
-                        {s === 'against' && '反对命题，将从反方视角发表论点'}
-                        {s === 'neutral' && '中立旁观，可自由提供证据或记录共识'}
-                      </div>
-                    </div>
-                    {myStance === s && (
-                      <span style={{ color: cfg.color, fontWeight: 700, fontSize: 16 }}>✓</span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* 提示：立场可以改变 */}
-            <div className="text-xs text-gray-600 text-center mb-4">
-              💡 立场可以在辩论中改变，每次变更都会被记录
-            </div>
-
-            {/* 确认按钮 */}
-            <button
-              disabled={!myStance || stanceLoading}
-              onClick={async () => {
-                if (!myStance) return
-                setStanceLoading(true)
-                try {
-                  await db.set(`debate-stance:${channelId}:${identity.nodeId}`, myStance)
-                  setShowStanceModal(false)
-                } finally {
-                  setStanceLoading(false)
-                }
-              }}
-              className="w-full py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-40 bg-[#6366f1] hover:bg-[#4f52d4] text-white"
-            >
-              {stanceLoading ? '保存中…' : myStance ? `以「${stanceConfig(myStance).label}」立场进入` : '请选择立场'}
-            </button>
-          </div>
-        </div>
+        <DebateStanceModal
+          channelId={channelId}
+          nodeId={identity.nodeId}
+          onConfirm={(stance) => {
+            setMyStance(stance)
+            setShowStanceModal(false)
+          }}
+        />
       )}
 
-      {/* ── rabbit-hole 分裂：子 Channel 跳转弹窗 ────────────────────────────── */}
+      {/* rabbit-hole 子 Channel 跳转弹窗 */}
       {spawnedChannel && (
-        <div
-          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
-          onClick={() => setSpawnedChannel(null)}
-        >
-          <div
-            className="bg-st-surface border border-[#7c3aed55] rounded-xl p-6 w-[380px] shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-center mb-4">
-              <div className="text-2xl mb-1">🐇</div>
-              <div className="text-sm font-semibold text-white">子课题 Channel 已创建</div>
-              <div className="text-xs text-gray-400 mt-1">
-                「{spawnedChannel.title}」已成为独立 Research Channel
-              </div>
-            </div>
-            <div className="bg-st-bg border border-st-border rounded-lg px-3 py-2 mb-4 font-mono text-xs text-gray-400 text-center select-all">
-              {spawnedChannel.channelId}
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  const id = spawnedChannel.channelId
-                  setSpawnedChannel(null)
-                  // 在新标签页打开子 Channel，保留当前 Channel 状态
-                  window.open(
-                    `${window.location.origin}${window.location.pathname}?channel=${id}`,
-                    '_blank'
-                  )
-                }}
-                className="flex-1 py-2 bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-sm rounded-lg font-medium transition-colors"
-              >
-                🔗 新标签页进入
-              </button>
-              <button
-                onClick={() => setSpawnedChannel(null)}
-                className="px-4 py-2 text-gray-400 hover:text-white text-sm transition-colors"
-              >
-                留在这里
-              </button>
-            </div>
-            <div className="mt-3 text-xs text-gray-600 text-center">
-              子 Channel 已自动加入到你的 Channel 列表
-            </div>
-          </div>
-        </div>
+        <SpawnedChannelDialog
+          channelId={spawnedChannel.channelId}
+          title={spawnedChannel.title}
+          onJump={() => {
+            const id = spawnedChannel.channelId
+            setSpawnedChannel(null)
+            window.open(`${window.location.origin}${window.location.pathname}?channel=${id}`, '_blank')
+          }}
+          onClose={() => setSpawnedChannel(null)}
+        />
       )}
     </div>
   )
 }
+
+
