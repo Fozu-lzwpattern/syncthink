@@ -58,6 +58,9 @@ importers:
       '@noble/hashes':
         specifier: ^2.0.1
         version: 2.2.0
+      '@tldraw/assets':
+        specifier: ^4.5.8
+        version: 4.5.8
       '@tldraw/tldraw':
         specifier: ^2.4.4
         version: 2.4.6(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -99,7 +102,7 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
       vite:
-        specifier: ^5.4.2
+        specifier: ^5.4.21
         version: 5.4.21(@types/node@22.19.17)
 
 packages:
@@ -1295,6 +1298,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@tldraw/assets@4.5.8':
+    resolution: {integrity: sha512-s+/Is7ZrOip1SG9zwFwbCEBS1lgRL5KiDh9/Yniecl6IDql+blaKlTWsm5LnqJR8lRoMR4BgDK6mLTZW3E6uWA==, tarball: https://registry.npmjs.org/@tldraw/assets/-/assets-4.5.8.tgz}
+
   '@tldraw/editor@2.4.6':
     resolution: {integrity: sha1-Gz2Ha/9No54h1jjCG8LG873K4DI=, tarball: http://r.npm.sankuai.com/@tldraw/editor/download/@tldraw/editor-2.4.6.tgz}
     peerDependencies:
@@ -1327,6 +1333,9 @@ packages:
 
   '@tldraw/utils@2.4.6':
     resolution: {integrity: sha1-FIRnEajxvWWDYxXDZxKVAZSke8s=, tarball: http://r.npm.sankuai.com/@tldraw/utils/download/@tldraw/utils-2.4.6.tgz}
+
+  '@tldraw/utils@4.5.8':
+    resolution: {integrity: sha1-y7JgNUfkeGupDafEdQEuYNh1cRk=, tarball: http://r.npm.sankuai.com/@tldraw/utils/download/@tldraw/utils-4.5.8.tgz}
 
   '@tldraw/validate@2.4.6':
     resolution: {integrity: sha1-KzPmHzVExRT0+LIKHqflW7nMj34=, tarball: http://r.npm.sankuai.com/@tldraw/validate/download/@tldraw/validate-2.4.6.tgz}
@@ -1559,6 +1568,10 @@ packages:
   fraction.js@5.3.4:
     resolution: {integrity: sha1-jA/MapkIJi307Rl0J73u9WPgaZo=, tarball: http://r.npm.sankuai.com/fraction.js/download/fraction.js-5.3.4.tgz}
 
+  fractional-indexing@3.2.0:
+    resolution: {integrity: sha1-EZPmPVT/Tgy+DHmp7Wz7qyXZFig=, tarball: http://r.npm.sankuai.com/fractional-indexing/download/fractional-indexing-3.2.0.tgz}
+    engines: {node: ^14.13.1 || >=16.0.0}
+
   fsevents@2.3.3:
     resolution: {integrity: sha1-ysZAd4XQNnWipeGlMFxpezR9kNY=, tarball: http://r.npm.sankuai.com/fsevents/download/fsevents-2.3.3.tgz}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -1648,6 +1661,10 @@ packages:
     resolution: {integrity: sha1-ndgQQ0JKPShFixk9ll8NGKIwC6k=, tarball: http://r.npm.sankuai.com/jiti/download/jiti-1.21.7.tgz}
     hasBin: true
 
+  jittered-fractional-indexing@1.0.1:
+    resolution: {integrity: sha1-nbWLYwW6dZzDtmppvYQ4gQvd3Y8=, tarball: http://r.npm.sankuai.com/jittered-fractional-indexing/download/jittered-fractional-indexing-1.0.1.tgz}
+    engines: {node: '>=18.0.0'}
+
   js-tokens@4.0.0:
     resolution: {integrity: sha1-GSA/tZmR35jjoocFDUZHzerzJJk=, tarball: http://r.npm.sankuai.com/js-tokens/download/js-tokens-4.0.0.tgz}
 
@@ -1676,6 +1693,9 @@ packages:
   lodash.isequal@4.5.0:
     resolution: {integrity: sha1-QVxEePK8wwEgwizhDtMib30+GOA=, tarball: http://r.npm.sankuai.com/lodash.isequal/download/lodash.isequal-4.5.0.tgz}
     deprecated: This package is deprecated. Use require('node:util').isDeepStrictEqual instead.
+
+  lodash.isequalwith@4.4.0:
+    resolution: {integrity: sha1-Jmcm3dUo+FTyH06pigZWBuD7xrA=, tarball: http://r.npm.sankuai.com/lodash.isequalwith/download/lodash.isequalwith-4.4.0.tgz}
 
   lodash.throttle@4.1.1:
     resolution: {integrity: sha1-wj6RtxAkKscMN/HhzaknTMOb8vQ=, tarball: http://r.npm.sankuai.com/lodash.throttle/download/lodash.throttle-4.1.1.tgz}
@@ -3113,6 +3133,10 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.60.0':
     optional: true
 
+  '@tldraw/assets@4.5.8':
+    dependencies:
+      '@tldraw/utils': 4.5.8
+
   '@tldraw/editor@2.4.6(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@tldraw/state': 2.4.6
@@ -3167,6 +3191,14 @@ snapshots:
 
   '@tldraw/utils@2.4.6':
     dependencies:
+      lodash.throttle: 4.1.1
+      lodash.uniq: 4.5.0
+
+  '@tldraw/utils@4.5.8':
+    dependencies:
+      jittered-fractional-indexing: 1.0.1
+      lodash.isequal: 4.5.0
+      lodash.isequalwith: 4.4.0
       lodash.throttle: 4.1.1
       lodash.uniq: 4.5.0
 
@@ -3443,6 +3475,8 @@ snapshots:
 
   fraction.js@5.3.4: {}
 
+  fractional-indexing@3.2.0: {}
+
   fsevents@2.3.3:
     optional: true
 
@@ -3506,6 +3540,10 @@ snapshots:
 
   jiti@1.21.7: {}
 
+  jittered-fractional-indexing@1.0.1:
+    dependencies:
+      fractional-indexing: 3.2.0
+
   js-tokens@4.0.0: {}
 
   jsesc@3.1.0: {}
@@ -3521,6 +3559,8 @@ snapshots:
   lines-and-columns@1.2.4: {}
 
   lodash.isequal@4.5.0: {}
+
+  lodash.isequalwith@4.4.0: {}
 
   lodash.throttle@4.1.1: {}
 
