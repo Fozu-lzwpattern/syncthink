@@ -33,12 +33,17 @@
  */
 
 import * as http from 'http'
+import * as https from 'https'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as WebSocket from 'ws'
 import * as ed from '@noble/ed25519'
 import { createHash } from 'crypto'
+import { loadMTLSConfig, createMTLSServer, getClientCertCN } from './tls.js'
+import { checkCapability, extractBearerToken, hasLegacyAuth } from './capability/middleware.js'
+import { issueToken, revokeToken, serializeToken, deserializeToken, loadOrCreateOwnerKeyPair } from './capability/token.js'
+import { ROLE_CAPABILITIES, ACTION_CAPABILITY_MAP, type TokenRole } from './capability/types.js'
 
 // ─── 白名单持久化路径 ──────────────────────────────────────────────────────────
 const TRUSTED_AGENTS_DIR = path.join(os.homedir(), '.syncthink')
@@ -214,7 +219,7 @@ async function verifyGetRequest(
 
 // ─── 启动函数 ─────────────────────────────────────────────────────────────────
 
-export function startAgentApi(opts: AgentApiOptions): http.Server {
+export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server {
   const {
     rooms,
     verbose = true,
@@ -234,6 +239,20 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
   if (registrations.size > 0) {
     log(`📂 loaded ${registrations.size} trusted agent(s) from ${TRUSTED_AGENTS_PATH}`)
   }
+
+  // ─── 加载/生成 owner 密钥对（能力令牌颁发/验证使用） ─────────────────────────
+  // 使用懒加载 Promise：startAgentApi 本身保持同步，密钥在首次使用时已完成初始化
+  let ownerPublicKey  = ''
+  let ownerPrivateKey = ''
+  let ownerNodeId     = ''
+  const ownerKeyPairPromise = loadOrCreateOwnerKeyPair().then((kp) => {
+    ownerPublicKey  = kp.publicKey
+    ownerPrivateKey = kp.privateKey
+    ownerNodeId     = kp.nodeId
+    log(`🔑 owner key loaded: nodeId=${kp.nodeId} pubKey=${kp.publicKey.slice(0, 16)}…`)
+  }).catch((err) => {
+    console.error('[agent-api] ❌ failed to load owner key pair:', err)
+  })
 
   /**
    * WS /agent/watch 连接：
@@ -263,15 +282,19 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
     timer: ReturnType<typeof setTimeout>
   }>()
 
-  // ─── HTTP 服务器 ────────────────────────────────────────────────────────────
+  // ─── mTLS 配置检测 ─────────────────────────────────────────────────────────
 
-  const server = http.createServer((req, res) => {
+  const mtlsConfig = loadMTLSConfig()
+
+  // ─── HTTP / HTTPS 请求处理函数 ──────────────────────────────────────────────
+
+  const requestHandler: http.RequestListener = (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
 
     // CORS（允许本地 Agent 脚本调用）
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Node-Id, X-Timestamp, X-Signature')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Node-Id, X-Timestamp, X-Signature, Authorization')
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -474,33 +497,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
     // ── POST /agent/command ────────────────────────────────────────────────
     if (req.method === 'POST' && url.pathname === '/agent/command') {
       readBody(req, async (body) => {
-        // ── Phase 2 Ed25519 鉴权 ──────────────────────────────────────────
-        const nodeId    = req.headers['x-node-id'] as string | undefined
-        const timestamp = req.headers['x-timestamp'] as string | undefined
-        const signature = req.headers['x-signature'] as string | undefined
-
-        if (!nodeId || !timestamp || !signature) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'missing auth headers: X-Node-Id, X-Timestamp, X-Signature required' }))
-          return
-        }
-
-        const registration = registrations.get(nodeId)
-        if (!registration) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
-          return
-        }
-
-        const authResult = await verifyAgentRequest(nodeId, timestamp, signature, registration.publicKey, body)
-        if (!authResult.ok) {
-          warn(`auth rejected: nodeId=${nodeId.slice(0, 12)}… reason=${authResult.reason}`)
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
-          return
-        }
-        // ─────────────────────────────────────────────────────────────────
-
+        // ── 先解析 body（需要 command.action 用于能力检查）─────────────────
         let data: AgentCommandBody
         try {
           data = JSON.parse(body) as AgentCommandBody
@@ -515,6 +512,52 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
           res.end(JSON.stringify({ error: 'channelId and command.action required' }))
           return
         }
+
+        // ── 能力令牌验证（优先）/ 旧版 Ed25519 验签（回退） ──────────────────
+        await ownerKeyPairPromise
+        // 用于后续日志追踪的身份标识（能力令牌路径使用 aud，Ed25519 路径使用 nodeId）
+        let callerNodeId = 'anonymous'
+
+        if (extractBearerToken(req)) {
+          // 能力令牌路径
+          const capResult = await checkCapability(req, data.command?.action ?? '', ownerPublicKey)
+          if (!capResult.allowed) {
+            warn(`capability check failed: ${capResult.reason}`)
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'capability_denied', reason: capResult.reason }))
+            return
+          }
+          // 从令牌中提取调用方 nodeId（用于日志记录）
+          if (capResult.token) callerNodeId = capResult.token.aud
+        } else {
+          // 回退到旧版 Ed25519 验签（向后兼容）
+          const nodeId    = req.headers['x-node-id'] as string | undefined
+          const timestamp = req.headers['x-timestamp'] as string | undefined
+          const signature = req.headers['x-signature'] as string | undefined
+
+          if (!nodeId || !timestamp || !signature) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'auth required: use Bearer token or X-Node-Id/X-Timestamp/X-Signature' }))
+            return
+          }
+
+          const registration = registrations.get(nodeId)
+          if (!registration) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
+            return
+          }
+
+          const authResult = await verifyAgentRequest(nodeId, timestamp, signature, registration.publicKey, body)
+          if (!authResult.ok) {
+            warn(`auth rejected: nodeId=${nodeId.slice(0, 12)}… reason=${authResult.reason}`)
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
+            return
+          }
+          callerNodeId = nodeId
+        }
+        // ─────────────────────────────────────────────────────────────────
 
         const room = rooms.get(data.channelId)
         if (!room || room.size === 0) {
@@ -531,7 +574,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
 
         // 封装成 syncthink:agent_command，广播给 room 内所有浏览器 tab
         // 注入 agentNodeId 到 command，供浏览器侧 Interaction Log 记录使用
-        const commandWithNodeId = { ...data.command, agentNodeId: nodeId }
+        const commandWithNodeId = { ...data.command, agentNodeId: callerNodeId }
         const envelope = JSON.stringify({
           type: 'syncthink:agent_command',
           channelId: data.channelId,
@@ -573,32 +616,46 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
 
     if (req.method === 'GET' && canvasQueryPaths.includes(url.pathname)) {
       void (async () => {
-        // Ed25519 鉴权（GET 请求，签名载荷为 pathname+search:timestamp）
-        const nodeId    = req.headers['x-node-id'] as string | undefined
-        const timestamp = req.headers['x-timestamp'] as string | undefined
-        const signature = req.headers['x-signature'] as string | undefined
+        // ── 能力令牌验证（优先）/ 旧版 Ed25519 验签（回退）──────────────────
+        await ownerKeyPairPromise
+        if (extractBearerToken(req)) {
+          // 能力令牌路径：canvas read 操作
+          const capResult = await checkCapability(req, 'canvas:read', ownerPublicKey)
+          if (!capResult.allowed) {
+            warn(`canvas query capability check failed: ${capResult.reason}`)
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'capability_denied', reason: capResult.reason }))
+            return
+          }
+        } else {
+          // 回退到旧版 Ed25519 鉴权（GET 请求，签名载荷为 pathname+search:timestamp）
+          const nodeId    = req.headers['x-node-id'] as string | undefined
+          const timestamp = req.headers['x-timestamp'] as string | undefined
+          const signature = req.headers['x-signature'] as string | undefined
 
-        if (!nodeId || !timestamp || !signature) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'missing auth headers: X-Node-Id, X-Timestamp, X-Signature required' }))
-          return
-        }
+          if (!nodeId || !timestamp || !signature) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'auth required: use Bearer token or X-Node-Id/X-Timestamp/X-Signature' }))
+            return
+          }
 
-        const registration = registrations.get(nodeId)
-        if (!registration) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
-          return
-        }
+          const registration = registrations.get(nodeId)
+          if (!registration) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unknown nodeId — call /agent/register first' }))
+            return
+          }
 
-        const pathAndQuery = `${url.pathname}${url.search}`
-        const authResult = await verifyGetRequest(nodeId, timestamp, signature, registration.publicKey, pathAndQuery)
-        if (!authResult.ok) {
-          warn(`canvas query auth rejected: ${authResult.reason}`)
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
-          return
+          const pathAndQuery = `${url.pathname}${url.search}`
+          const authResult = await verifyGetRequest(nodeId, timestamp, signature, registration.publicKey, pathAndQuery)
+          if (!authResult.ok) {
+            warn(`canvas query auth rejected: ${authResult.reason}`)
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unauthorized', reason: authResult.reason }))
+            return
+          }
         }
+        // ─────────────────────────────────────────────────────────────────
 
         // 通用 queryCanvas 辅助函数
         async function queryCanvas(
@@ -767,10 +824,132 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
       return
     }
 
+    // ── POST /token/issue ─────────────────────────────────────────────────
+    if (req.method === 'POST' && url.pathname === '/token/issue') {
+      readBody(req, async (body) => {
+        // 确保 owner 密钥已初始化
+        await ownerKeyPairPromise
+        if (!ownerPrivateKey) {
+          res.writeHead(503, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'owner_key_not_ready' }))
+          return
+        }
+        try {
+          const data = JSON.parse(body) as {
+            audNodeId: string
+            role?: TokenRole
+            capabilities?: string[]
+            expiresInMs?: number
+          }
+          if (!data.audNodeId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'audNodeId required' }))
+            return
+          }
+          const token = await issueToken({
+            issNodeId:    ownerNodeId,
+            issPrivateKey: ownerPrivateKey,
+            audNodeId:    data.audNodeId,
+            role:         data.role,
+            capabilities: data.capabilities as import('./capability/types.js').Capability[] | undefined,
+            expiresInMs:  data.expiresInMs,
+          })
+          const tokenStr = serializeToken(token)
+          log(`🎫 token issued: aud=${data.audNodeId} role=${data.role ?? 'custom'} exp=${token.exp}`)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, token: tokenStr, exp: token.exp, cap: token.cap }))
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid_request', reason: String(err) }))
+        }
+      })
+      return
+    }
+
+    // ── POST /token/revoke ─────────────────────────────────────────────────
+    if (req.method === 'POST' && url.pathname === '/token/revoke') {
+      readBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { nonce?: string; token?: string }
+          let nonce: string | undefined = data.nonce
+
+          if (!nonce && data.token) {
+            const parsed = deserializeToken(data.token)
+            if (!parsed) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'invalid_token_format' }))
+              return
+            }
+            nonce = parsed.nonce
+          }
+
+          if (!nonce) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'nonce or token required' }))
+            return
+          }
+
+          revokeToken(nonce)
+          log(`🚫 token revoked: nonce=${nonce}`)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, nonce }))
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid_request', reason: String(err) }))
+        }
+      })
+      return
+    }
+
+    // ── GET /token/list ────────────────────────────────────────────────────
+    if (req.method === 'GET' && url.pathname === '/token/list') {
+      const agentList = [...registrations.values()].map((r) => ({
+        nodeId:       r.nodeId,
+        registeredAt: r.registeredAt,
+      }))
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        ok:              true,
+        ownerNodeId,
+        ownerPublicKey,
+        registeredAgents: agentList,
+        agentCount:       agentList.length,
+      }))
+      return
+    }
+
+    // ── GET /token/verify ──────────────────────────────────────────────────
+    if (req.method === 'GET' && url.pathname === '/token/verify') {
+      void (async () => {
+        await ownerKeyPairPromise
+        const tokenStr = extractBearerToken(req)
+        if (!tokenStr) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Authorization: Bearer <token> required' }))
+          return
+        }
+        const result = await checkCapability(req, '', ownerPublicKey)
+        if (!result.allowed) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, reason: result.reason }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, token: result.token }))
+      })()
+      return
+    }
+
     // 404
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found', path: url.pathname }))
-  })
+  }
+
+  // ─── 创建服务器（mTLS 或普通 HTTP）─────────────────────────────────────────
+
+  const server: http.Server | https.Server = mtlsConfig
+    ? createMTLSServer(mtlsConfig, requestHandler)
+    : http.createServer(requestHandler)
 
   // ─── WebSocket /agent/watch ─────────────────────────────────────────────────
 
@@ -818,14 +997,25 @@ export function startAgentApi(opts: AgentApiOptions): http.Server {
     console.log(`  ║  🤖  SyncThink Agent API  v1.0.0      ║`)
     console.log(`  ╚════════════════════════════════════════╝`)
     console.log('')
-    console.log(`  HTTP ✅  http://${host}:${port}`)
-    console.log(`  WS   ✅  ws://${host}:${port}/agent/watch?channel=<id>`)
+    const proto = mtlsConfig ? 'https' : 'http'
+    const wsProto = mtlsConfig ? 'wss' : 'ws'
+    console.log(`  ${proto.toUpperCase()} ✅  ${proto}://${host}:${port}`)
+    console.log(`  WS   ✅  ${wsProto}://${host}:${port}/agent/watch?channel=<id>`)
+    if (mtlsConfig) {
+      console.log(`  🔐  mTLS: 已启用（客户端证书必须由 ~/.syncthink/ca/ca.crt 签发）`)
+    } else {
+      console.log(`  ⚠️   mTLS: 未启用（运行 npx tsx scripts/setup-ca.ts init 启用）`)
+    }
     console.log('')
     console.log(`  端点：`)
     console.log(`    POST /agent/register         注册 Agent`)
     console.log(`    POST /agent/command          发送画布指令`)
     console.log(`    POST /agent/channel/create   创建新 Channel（支持选择场景）`)
     console.log(`    GET  /agent/status           查询状态`)
+    console.log(`    POST /token/issue            颁发能力令牌`)
+    console.log(`    POST /token/revoke           吊销能力令牌`)
+    console.log(`    GET  /token/list             查看令牌列表`)
+    console.log(`    GET  /token/verify           验证令牌（调试用）`)
     console.log('')
   })
 
@@ -900,8 +1090,13 @@ function readBody(req: http.IncomingMessage, callback: (body: string) => void | 
   })
 }
 
-// 扩展 http.Server 类型，支持 forwardAgentEvent
+// 扩展 http.Server / https.Server 类型，支持 forwardAgentEvent
 declare module 'http' {
+  interface Server {
+    forwardAgentEvent?: (channelId: string, event: string) => void
+  }
+}
+declare module 'https' {
   interface Server {
     forwardAgentEvent?: (channelId: string, event: string) => void
   }

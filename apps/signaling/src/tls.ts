@@ -19,6 +19,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import * as os from 'os'
 import * as https from 'https'
 import * as http from 'http'
 import { execSync, spawnSync } from 'child_process'
@@ -274,4 +275,80 @@ export function getPort(tlsConfig: TLSConfig | null): number {
  */
 export function getProtocol(tlsConfig: TLSConfig | null): 'wss' | 'ws' {
   return tlsConfig ? 'wss' : 'ws'
+}
+
+// ─── mTLS 支持 ────────────────────────────────────────────────────────────────
+
+export interface MTLSConfig extends TLSConfig {
+  ca: Buffer       // CA 证书（用于验证客户端证书）
+  mtls: true
+}
+
+/**
+ * 尝试加载 mTLS 配置
+ * 需要以下文件存在（均在 ~/.syncthink/ca/ 目录）：
+ * - ca.crt       私有 CA 证书
+ * - server.crt   服务端证书（由 CA 签发）
+ * - server.key   服务端私钥
+ *
+ * 若文件不存在，返回 null（不强制要求 mTLS，保持向后兼容）
+ */
+export function loadMTLSConfig(): MTLSConfig | null {
+  const caDir = path.join(os.homedir(), '.syncthink', 'ca')
+  const caCertPath = path.join(caDir, 'ca.crt')
+  const serverCertPath = path.join(caDir, 'server.crt')
+  const serverKeyPath = path.join(caDir, 'server.key')
+
+  if (!fs.existsSync(caCertPath) || !fs.existsSync(serverCertPath) || !fs.existsSync(serverKeyPath)) {
+    return null
+  }
+
+  try {
+    return {
+      cert: fs.readFileSync(serverCertPath),
+      key: fs.readFileSync(serverKeyPath),
+      ca: fs.readFileSync(caCertPath),
+      source: 'env',  // 复用 source 类型
+      mtls: true,
+    }
+  } catch (err) {
+    console.warn('[tls] ⚠️ mTLS 证书加载失败:', err)
+    return null
+  }
+}
+
+/**
+ * 创建 mTLS HTTPS 服务器（要求客户端证书）
+ * 从 TLS 握手中提取 Agent nodeId（证书 CN）
+ */
+export function createMTLSServer(
+  mtlsConfig: MTLSConfig,
+  handler: http.RequestListener
+): https.Server {
+  return https.createServer(
+    {
+      cert: mtlsConfig.cert,
+      key: mtlsConfig.key,
+      ca: mtlsConfig.ca,
+      requestCert: true,        // 要求客户端提供证书
+      rejectUnauthorized: true, // 拒绝无证书或无效证书的连接
+    },
+    handler
+  )
+}
+
+/**
+ * 从 mTLS 连接中提取客户端证书的 CN（作为 Agent nodeId）
+ * 在 request handler 中调用
+ */
+export function getClientCertCN(req: http.IncomingMessage): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const socket = req.socket as any
+    const cert = socket.getPeerCertificate?.()
+    if (!cert || !cert.subject?.CN) return null
+    return cert.subject.CN as string
+  } catch {
+    return null
+  }
 }
