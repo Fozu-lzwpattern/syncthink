@@ -12,12 +12,16 @@ export type InteractionType =
   | 'card_edited'
   | 'card_deleted'
   | 'card_voted'
+  | 'card_confirmed'      // ← spec 7.5.4: 本地用户点击"确认"对方决议卡
+  | 'action_completed'    // ← spec 7.5.4: 行动项状态变为 completed
   | 'channel_joined'
   | 'channel_created'
   | 'agent_write'
   | 'agent_confirm'
   | 'agent_reject'
   | 'agent_message'
+  | 'agent_assisted'      // ← spec 7.5.4: Agent 建议被采用（用户点击接受）
+  | 'agent_ignored'       // ← spec 7.5.4: Agent 建议被忽略（超时未响应）
 
 export interface InteractionRecord {
   id: string               // nanoid

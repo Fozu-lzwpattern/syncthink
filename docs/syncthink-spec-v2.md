@@ -1279,7 +1279,7 @@ syncthink/
 │   └── knowledge-map-v1.json       # ⭐ 知识地图（增长型）
 ├── docs/
 │   ├── syncthink-design.md         # 技术设计文档（详版）
-│   └── syncthink-spec-v1.md        # 产品与技术规格说明书（本文档）
+│   └── syncthink-spec-v2.md        # 产品与技术规格说明书（v2.0，本文档）
 ├── pnpm-workspace.yaml
 ├── package.json
 └── README.md

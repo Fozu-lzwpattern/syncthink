@@ -51,6 +51,15 @@ export interface SyncAdapter {
   snapshots: SnapshotManager
   destroy: () => void
   getConnectedPeers: () => number
+  /**
+   * 设置本地节点 Yjs awareness presence 字段。
+   * 调用后其他 Peer 可在 awareness.states 里读到此节点的颜色、displayName、isAgent。
+   * 应在 adapter 初始化后、Editor mount 前调用，传入 NodeIdentity 派生数据。
+   *
+   * 推荐字段：
+   *   { displayName, color, isAgent, nodeId }
+   */
+  setLocalPresence: (fields: Record<string, unknown>) => void
   /** P3: 动态加入信任对等方（publicKey hex） */
   trustPeer: (publicKey: string) => void
   /** P3: 撤销对等方信任 */
@@ -290,6 +299,20 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
     },
     getConnectedPeers() {
       return provider?.room?.webrtcConns.size ?? 0
+    },
+
+    // ── Awareness（多人 Presence） ─────────────────────────────────────
+    /**
+     * 设置本地节点的 Yjs awareness presence 字段。
+     * provider 可能在 setLocalPresence 调用时尚未初始化（enableWebrtc=false 时），
+     * 因此通过 ydoc.awareness（y-webrtc 内部存储）直接写入，兼容所有情况。
+     */
+    setLocalPresence(fields: Record<string, unknown>) {
+      if (provider?.awareness) {
+        for (const [key, value] of Object.entries(fields)) {
+          provider.awareness.setLocalStateField(key, value)
+        }
+      }
     },
 
     // ── P3: 访问控制 API ────────────────────────────────────────────────

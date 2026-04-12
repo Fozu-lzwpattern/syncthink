@@ -369,6 +369,18 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
       adapterRef.current = a
 
+      // ── Awareness Presence：设置本地节点身份，让其他 Peer 看到颜色/名字 ──
+      // provider 在 WebRTC 握手完成后才可用，稍作延迟等待 provider 建立
+      // 放在 setTimeout(0) 里，确保 provider 已附加到 adapter
+      setTimeout(() => {
+        a.setLocalPresence({
+          nodeId: identity.nodeId,
+          displayName: identity.displayName,
+          color: identity.avatarColor,
+          isAgent: false,   // 人类节点
+        })
+      }, 0)
+
       // 等 IndexedDB 加载完成再渲染
       a.persistence.whenSynced.then(async () => {
         if (!destroyed) {
@@ -935,6 +947,50 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
 
     window.addEventListener('syncthink:card_vote', handleCardVote)
     return () => window.removeEventListener('syncthink:card_vote', handleCardVote)
+  }, [channelId, identity.nodeId])
+
+  // ─── 卡片状态切换处理（spec 7.5.4: card_confirmed / action_completed）──────
+  useEffect(() => {
+    const handleStatusChange = async (e: Event) => {
+      const { shapeId, prevStatus, nextStatus, cardType, authorNodeId } = (e as CustomEvent<{
+        shapeId: string
+        prevStatus: string
+        nextStatus: string
+        cardType: string
+        authorNodeId?: string
+      }>).detail
+      const ed = editorRef.current
+      if (!ed) return
+      const tlId = shapeId as ReturnType<typeof createShapeId>
+      // 更新 shape status
+      ed.updateShape({
+        id: tlId,
+        type: 'syncthink-card',
+        props: { status: nextStatus as 'open' | 'resolved' | 'archived' },
+      })
+      // spec 7.5.4: decision 卡片被 resolved → card_confirmed（认可他人决议）
+      if (cardType === 'decision' && nextStatus === 'resolved' && authorNodeId !== identity.nodeId) {
+        await recordInteraction({
+          channelId,
+          actorNodeId: identity.nodeId,
+          targetNodeId: authorNodeId,
+          type: 'card_confirmed',
+          payload: { shapeId, prevStatus, nextStatus },
+        })
+      }
+      // spec 7.5.4: action 卡片状态 → resolved → action_completed
+      if (cardType === 'action' && nextStatus === 'resolved') {
+        await recordInteraction({
+          channelId,
+          actorNodeId: identity.nodeId,
+          targetNodeId: authorNodeId,
+          type: 'action_completed',
+          payload: { shapeId, prevStatus, nextStatus },
+        })
+      }
+    }
+    window.addEventListener('syncthink:card_status_change', handleStatusChange)
+    return () => window.removeEventListener('syncthink:card_status_change', handleStatusChange)
   }, [channelId, identity.nodeId])
 
   // ---- 增长场景：rabbit-hole 分裂（Research 场景）— 真实创建子 Channel ----
@@ -1658,6 +1714,14 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
                     type: 'agent_reject',
                     payload: { action: pendingAgentCmd.cmd.action, prompt: pendingAgentCmd.prompt },
                   })
+                  // spec 7.5.4: agent_ignored — Agent 建议未被采用
+                  await recordInteraction({
+                    channelId,
+                    actorNodeId: identity.nodeId,
+                    targetNodeId: pendingAgentCmd.cmd.agentNodeId,
+                    type: 'agent_ignored',
+                    payload: { action: pendingAgentCmd.cmd.action },
+                  })
                   setPendingAgentCmd(null)
                 }}
                 style={{
@@ -1676,6 +1740,14 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
                     actorNodeId: identity.nodeId,
                     type: 'agent_confirm',
                     payload: { action: pendingAgentCmd.cmd.action, prompt: pendingAgentCmd.prompt },
+                  })
+                  // spec 7.5.4: agent_assisted — Agent 建议被采用
+                  await recordInteraction({
+                    channelId,
+                    actorNodeId: identity.nodeId,
+                    targetNodeId: pendingAgentCmd.cmd.agentNodeId,
+                    type: 'agent_assisted',
+                    payload: { action: pendingAgentCmd.cmd.action },
                   })
                   setPendingAgentCmd(null)
                   // 重新 dispatch（不带 requiresConfirmation，直接执行）

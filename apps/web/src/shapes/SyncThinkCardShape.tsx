@@ -228,9 +228,32 @@ export class SyncThinkCardShapeUtil extends BaseBoxShapeUtil<SyncThinkCardShape>
                   <span>▲</span>
                   <span>{votes > 0 ? votes : ''}</span>
                 </button>
-                <span style={{ fontSize: 10, color: statusCfg.color, border: `1px solid ${statusCfg.color}30`, borderRadius: 4, padding: '1px 5px' }}>
+                <button
+                  onPointerDown={(ev) => ev.stopPropagation()}
+                  onClick={(ev) => {
+                    ev.stopPropagation()
+                    // 状态循环：open → resolved → archived → open
+                    const next: CardStatus =
+                      status === 'open' ? 'resolved'
+                      : status === 'resolved' ? 'archived'
+                      : 'open'
+                    window.dispatchEvent(new CustomEvent('syncthink:card_status_change', {
+                      detail: { shapeId: shape.id, prevStatus: status, nextStatus: next, cardType: shape.props.cardType, authorNodeId: shape.props.authorNodeId },
+                    }))
+                  }}
+                  title="点击切换状态"
+                  style={{
+                    background: 'none',
+                    border: `1px solid ${statusCfg.color}30`,
+                    borderRadius: 4,
+                    padding: '1px 5px',
+                    cursor: 'pointer',
+                    fontSize: 10,
+                    color: statusCfg.color,
+                  }}
+                >
                   {statusCfg.label}
-                </span>
+                </button>
               </div>
             </div>
           </div>
