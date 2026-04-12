@@ -14,6 +14,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as Y from 'yjs'
 import { Tldraw, type Editor, createShapeId, type TLRecord } from '@tldraw/tldraw'
+import { getAssetUrlsByImport } from '@tldraw/assets/imports.vite'
+
+const tldrawAssetUrls = getAssetUrlsByImport()
 // @ts-expect-error css side-effect import
 import '@tldraw/tldraw/tldraw.css'
 import { createSyncAdapter, type SyncAdapter, type PendingDeleteEvent } from '../sync/adapter'
@@ -616,6 +619,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
               shapeUtils={CUSTOM_SHAPE_UTILS}
               onMount={handleMount as (editor: Editor) => void}
               hideUi={isReview && rewindDoc !== null}
+              assetUrls={tldrawAssetUrls}
             />
           )}
         </div>
