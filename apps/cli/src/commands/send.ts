@@ -34,16 +34,18 @@ export async function runSend(opts: {
   console.log(`   内容: ${opts.message.slice(0, 50)}${opts.message.length > 50 ? '...' : ''}`)
 
   const payload = {
-    action: 'conversation:append',
     channelId: opts.channel,
-    message: {
-      sender,
-      content: opts.message,
-      timestamp: Date.now(),
+    command: {
+      action: 'conversation:append',
+      message: {
+        sender,
+        content: opts.message,
+        timestamp: Date.now(),
+      },
     },
   }
 
-  const result = await apiPost('/agent/action', payload, config)
+  const result = await apiPost('/agent/command', payload, config)
   const data = result as Record<string, unknown>
 
   console.log(`✅ 消息已发送`)

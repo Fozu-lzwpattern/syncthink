@@ -34,20 +34,22 @@ export async function runCardCreate(opts: {
   if (opts.body) console.log(`   正文    : ${opts.body.slice(0, 60)}${opts.body.length > 60 ? '...' : ''}`)
 
   const payload = {
-    action: 'shape:create',
     channelId: opts.channel,
-    shape: {
-      type: opts.type,
-      props: {
-        title: opts.title,
-        body: opts.body ?? '',
+    command: {
+      action: 'shape:create',
+      shape: {
+        type: opts.type,
+        props: {
+          title: opts.title,
+          body: opts.body ?? '',
+        },
+        x: opts.x ?? 100,
+        y: opts.y ?? 100,
       },
-      x: opts.x ?? 100,
-      y: opts.y ?? 100,
     },
   }
 
-  const result = await apiPost('/agent/action', payload, config)
+  const result = await apiPost('/agent/command', payload, config)
   const data = result as Record<string, unknown>
 
   console.log(`✅ 卡片已创建`)
@@ -74,7 +76,7 @@ export async function runCardList(opts: {
   const token = loadCapabilityToken()
   const config = { identity, apiUrl, capabilityToken: token ?? undefined }
 
-  const result = await apiGet('/agent/canvas', { channelId: opts.channel }, config)
+  const result = await apiGet('/canvas/elements', { channelId: opts.channel }, config)
   const data = result as Record<string, unknown>
 
   const shapes = (data?.shapes ?? data?.cards ?? []) as unknown[]

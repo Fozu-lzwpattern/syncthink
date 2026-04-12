@@ -130,8 +130,8 @@ async function main(): Promise<void> {
 
     case 'send': {
       // syncthink-agent send --channel <id> [--sender <name>] <message>
-      // message 是位置参数（在 --channel 之后的非 flag 参数）
-      const message = args[0] ?? opts['message'] ?? ''
+      // message 是位置参数：subcommand（positional[1]）或 args[0]（positional[2]+）
+      const message = subcommand ?? args[0] ?? opts['message'] ?? ''
       if (!message) {
         console.error('❌ 错误: 缺少消息内容')
         console.error('   用法: syncthink-agent send --channel <id> "<message>"')

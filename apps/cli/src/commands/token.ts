@@ -196,7 +196,7 @@ export async function runTokenIssue(opts: {
   console.log(`   有效期 : ${expiresInMs / 3600_000}h`)
 
   const result = await apiPost('/token/issue', {
-    aud: opts.aud,
+    audNodeId: opts.aud,
     cap,
     expiresInMs,
   }, { identity, apiUrl, capabilityToken: adminToken })
