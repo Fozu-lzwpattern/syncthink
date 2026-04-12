@@ -76,7 +76,7 @@ export async function runCardList(opts: {
   const token = loadCapabilityToken()
   const config = { identity, apiUrl, capabilityToken: token ?? undefined }
 
-  const result = await apiGet('/canvas/elements', { channelId: opts.channel }, config)
+  const result = await apiGet('/canvas/elements', { channel: opts.channel }, config)
   const data = result as Record<string, unknown>
 
   const shapes = (data?.shapes ?? data?.cards ?? []) as unknown[]
