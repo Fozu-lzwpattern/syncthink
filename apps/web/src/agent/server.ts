@@ -72,6 +72,8 @@ export interface AgentCommand {
   }
   /** 发出此指令的 Agent nodeId，用于 Interaction Log 记录 */
   agentNodeId?: string
+  /** Agent 的人类可读别名（如"喵神"、"李增伟的个人助理"），注册时设置 */
+  agentDisplayName?: string
   /** 是否需要人工确认（Agent 发出的写操作可选择要求确认） */
   requiresConfirmation?: boolean
   /** 确认提示文案（显示给用户） */

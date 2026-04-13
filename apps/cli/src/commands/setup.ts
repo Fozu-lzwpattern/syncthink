@@ -13,10 +13,11 @@ const SYNCTHINK_DIR = path.join(os.homedir(), '.syncthink')
  * 3. 检查 mTLS 证书状态
  * 4. 打印当前状态
  */
-export async function runSetup(opts: { apiUrl?: string; force?: boolean }): Promise<void> {
+export async function runSetup(opts: { apiUrl?: string; force?: boolean; displayName?: string }): Promise<void> {
   const apiUrl = opts.apiUrl ?? DEFAULT_API_URL
   console.log('🔧 SyncThink Agent 初始化')
   console.log(`📡 API 地址: ${apiUrl}`)
+  if (opts.displayName) console.log(`🏷️  别名: ${opts.displayName}`)
   console.log('')
 
   // Step 1: 处理 identity
@@ -44,9 +45,11 @@ export async function runSetup(opts: { apiUrl?: string; force?: boolean }): Prom
     const result = await apiPost('/agent/register', {
       nodeId: identity.nodeId,
       publicKey: identity.publicKey,
+      ...(opts.displayName ? { displayName: opts.displayName } : {}),
     }, { identity, apiUrl })
     console.log(`✅ 注册成功`)
     const data = result as Record<string, unknown>
+    if (data?.displayName) console.log(`   别名已设置: ${data.displayName}`)
     if (data?.message) console.log(`   服务器消息: ${data.message}`)
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)

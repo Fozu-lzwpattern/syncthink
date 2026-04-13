@@ -65,6 +65,7 @@ SyncThink Agent CLI v1.0.0
 
 命令:
   setup                              初始化身份并注册到服务器
+       [--display-name <name>]         设置 Agent 别名（如"喵神"、"李增伟的个人助理"）
   status                             查看连接和令牌状态
   send --channel <id> <msg>          发送消息到 channel
   card create --channel <id>         创建卡片
@@ -86,6 +87,7 @@ SyncThink Agent CLI v1.0.0
   --help, -h                         显示帮助
 
 示例:
+  syncthink-agent setup --display-name "喵神"
   syncthink-agent setup
   syncthink-agent status
   syncthink-agent send --channel abc123 "开始今天的规划"
@@ -119,6 +121,7 @@ async function main(): Promise<void> {
       await runSetup({
         apiUrl,
         force: opts['force'] === 'true',
+        displayName: opts['display-name'],
       })
       break
     }

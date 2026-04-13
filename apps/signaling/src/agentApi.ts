@@ -86,6 +86,7 @@ export interface AgentApiOptions {
 interface AgentRegistration {
   nodeId: string
   publicKey: string
+  displayName?: string   // 可选：Agent 的人类可读别名（如"喵神"、"李增伟的个人助理"）
   registeredAt: number
 }
 
@@ -330,7 +331,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
     if (req.method === 'POST' && url.pathname === '/agent/register') {
       readBody(req, (body) => {
         try {
-          const data = JSON.parse(body) as { nodeId: string; publicKey: string }
+          const data = JSON.parse(body) as { nodeId: string; publicKey: string; displayName?: string }
           if (!data.nodeId || !data.publicKey) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ error: 'nodeId and publicKey required' }))
@@ -339,12 +340,14 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
           registrations.set(data.nodeId, {
             nodeId: data.nodeId,
             publicKey: data.publicKey,
+            displayName: data.displayName,
             registeredAt: Date.now(),
           })
           saveTrustedAgents(registrations)
-          log(`✅ agent registered & persisted: nodeId=${data.nodeId.slice(0, 12)}… → ${TRUSTED_AGENTS_PATH}`)
+          const nameTag = data.displayName ? ` (${data.displayName})` : ''
+          log(`✅ agent registered & persisted: nodeId=${data.nodeId.slice(0, 12)}…${nameTag} → ${TRUSTED_AGENTS_PATH}`)
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, nodeId: data.nodeId }))
+          res.end(JSON.stringify({ ok: true, nodeId: data.nodeId, displayName: data.displayName ?? null }))
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'invalid JSON' }))
@@ -578,8 +581,13 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
         }
 
         // 封装成 syncthink:agent_command，广播给 room 内所有浏览器 tab
-        // 注入 agentNodeId 到 command，供浏览器侧 Interaction Log 记录使用
-        const commandWithNodeId = { ...data.command, agentNodeId: callerNodeId }
+        // 注入 agentNodeId + agentDisplayName 到 command，供浏览器侧渲染 authorName 使用
+        const registration = callerNodeId ? registrations.get(callerNodeId) : undefined
+        const commandWithNodeId = {
+          ...data.command,
+          agentNodeId: callerNodeId,
+          agentDisplayName: registration?.displayName ?? undefined,
+        }
         const envelope = JSON.stringify({
           type: 'syncthink:agent_command',
           channelId: data.channelId,
@@ -910,6 +918,7 @@ export function startAgentApi(opts: AgentApiOptions): http.Server | https.Server
     if (req.method === 'GET' && url.pathname === '/token/list') {
       const agentList = [...registrations.values()].map((r) => ({
         nodeId:       r.nodeId,
+        displayName:  r.displayName ?? null,
         registeredAt: r.registeredAt,
       }))
       res.writeHead(200, { 'Content-Type': 'application/json' })

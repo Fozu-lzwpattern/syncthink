@@ -88,6 +88,16 @@ interface Props {
   onBack: () => void
 }
 
+/**
+ * 解析 Agent 指令中的显示名称
+ * 优先用注册时设置的 agentDisplayName，降级到 "Agent:xxxxxxxx"
+ */
+function resolveAgentName(cmd: { agentNodeId?: string; agentDisplayName?: string }): string {
+  if (cmd.agentDisplayName) return cmd.agentDisplayName
+  if (cmd.agentNodeId) return `Agent:${cmd.agentNodeId.slice(0, 8)}`
+  return 'Agent'
+}
+
 export function CanvasPage({ channelId, identity, onBack }: Props) {
   const adapterRef = useRef<SyncAdapter | null>(null)
   const editorRef = useRef<Editor | null>(null)
@@ -268,7 +278,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
           cardType: ['idea','decision','issue','action','reference'].includes(cardType) ? cardType : 'idea',
           title,
           body,
-          authorName: cmd.agentNodeId ? `Agent:${(cmd.agentNodeId as string).slice(0, 8)}` : 'Agent',
+          authorName: resolveAgentName(cmd as { agentNodeId?: string; agentDisplayName?: string }),
           isAgentCreated: true,
         },
       })
@@ -304,7 +314,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
             body: cardProps.body ?? '',
             tags: cardProps.tags ?? [],
             status: cardProps.status ?? 'open',
-            authorName: cardProps.authorName ?? (cmd.agentNodeId ? `Agent:${cmd.agentNodeId.slice(0, 8)}` : 'Agent'),
+            authorName: (cardProps.authorName as string | undefined) ?? resolveAgentName(cmd as { agentNodeId?: string; agentDisplayName?: string }),
             authorNodeId: cmd.agentNodeId ?? 'agent',
             votes: cardProps.votes ?? 0,
             w: s.w ?? 280, h: s.h ?? 160,
@@ -359,7 +369,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
         const agentMsg: ChatMessage = {
           id: chatMsgId(),
           authorNodeId: cmd.agentNodeId ?? 'agent',
-          authorName: `Agent:${(cmd.agentNodeId ?? 'agent').slice(0, 8)}`,
+          authorName: resolveAgentName(cmd as { agentNodeId?: string; agentDisplayName?: string }),
           isAgent: true,
           content: (cmd as { message?: string }).message ?? '',
           timestamp: Date.now(),
@@ -377,7 +387,7 @@ export function CanvasPage({ channelId, identity, onBack }: Props) {
       ed.createShape({
         id, type: 'chat-distill-card',
         x: x + 20 + Math.random() * 60, y: y - 80 + Math.random() * 60,
-        props: { w: 320, h: 170, summary: distillData.summary, sourceMessageIds: distillData.sourceMessageIds, sourceCount: distillData.sourceMessageIds.length, distilledBy: cmd.agentNodeId ?? 'agent', distilledByName: `Agent:${(cmd.agentNodeId ?? 'agent').slice(0, 8)}`, distilledAt: Date.now(), authorNames },
+        props: { w: 320, h: 170, summary: distillData.summary, sourceMessageIds: distillData.sourceMessageIds, sourceCount: distillData.sourceMessageIds.length, distilledBy: cmd.agentNodeId ?? 'agent', distilledByName: resolveAgentName(cmd as { agentNodeId?: string; agentDisplayName?: string }), distilledAt: Date.now(), authorNames },
       })
       const yArr = chat.chatYArrayRef.current
       if (yArr) {

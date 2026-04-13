@@ -64,10 +64,14 @@ export class AgentWsClient {
   private destroyed = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+  /** 是否由外部显式指定了信令地址（跳过自动发现） */
+  private signalingUrlExplicit: boolean
+
   constructor(opts: AgentWsClientOptions) {
     this.channelId = opts.channelId
     this.nodeId = opts.nodeId
     this.publicKey = opts.publicKey
+    this.signalingUrlExplicit = !!opts.signalingUrl
     // 默认走 vite proxy (/signaling) → wss://localhost:4443（绕过自签名证书）
     // 生产环境通过 opts.signalingUrl 显式传入
     const defaultUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/signaling`
@@ -84,6 +88,51 @@ export class AgentWsClient {
   }
 
   start() {
+    // 如果外部显式指定了 signalingUrl，直接连接，跳过自动发现
+    if (this.signalingUrlExplicit) {
+      this.connect()
+      return
+    }
+    // 否则先通过 /peers 探测局域网 Leader，再连接
+    this._discoverAndConnect()
+  }
+
+  /**
+   * 通过 GET /peers 探测局域网主信令节点
+   * 本机信令服务器在 localhost 同端口（vite proxy 转发），直接查询即可
+   * 如果返回了局域网 peers，则连接最老的那个（Leader）
+   * 如果查询失败或无 peers，则连接本机（本机即为 Leader）
+   */
+  private async _discoverAndConnect() {
+    if (this.destroyed) return
+
+    try {
+      // 通过 vite proxy 查询本机信令服务的 /peers 端点
+      const res = await fetch('/signaling-peers', { signal: AbortSignal.timeout(3000) })
+      if (res.ok) {
+        const data = await res.json() as {
+          self: { nodeId: string; port: number; isLeader: boolean }
+          peers: Array<{ nodeId: string; host: string; port: number; startTime: number }>
+        }
+
+        if (data.peers && data.peers.length > 0) {
+          // 有局域网 peers → 找最早启动的（Leader）
+          const sorted = [...data.peers].sort((a, b) => a.startTime - b.startTime)
+          const leader = sorted[0]
+          const wsProto = location.protocol === 'https:' ? 'wss' : 'ws'
+          const leaderUrl = `${wsProto}://${leader.host}:${leader.port}`
+          this.log(`🌐 LAN Leader found: ${leader.nodeId} @ ${leaderUrl}`)
+          this.signalingUrl = leaderUrl
+        } else {
+          // 无 peers → 本机是 Leader，连本机
+          this.log(`👑 本机是 Leader，连接 ${this.signalingUrl}`)
+        }
+      }
+    } catch (e) {
+      // 查询失败（本机信令未启动等），fallback 到默认地址
+      this.log(`⚠️ /signaling-peers 查询失败，fallback 到默认地址: ${e}`)
+    }
+
     this.connect()
   }
 

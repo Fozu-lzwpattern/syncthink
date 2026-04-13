@@ -15,6 +15,12 @@ export default defineConfig({
         secure: false,
         rewrite: (path) => path.replace(/^\/signaling/, ''),
       },
+      // HTTP proxy: GET /signaling-peers → 本机信令服务的 /peers 端点（LAN Discovery 用）
+      '/signaling-peers': {
+        target: 'http://localhost:4444',
+        secure: false,
+        rewrite: () => '/peers',
+      },
     },
   },
   optimizeDeps: {

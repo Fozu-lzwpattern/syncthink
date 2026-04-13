@@ -1,5 +1,5 @@
 /**
- * SyncThink 信令服务器 v0.6.0 (mTLS + 能力令牌 + Network Policy)
+ * SyncThink 信令服务器 v0.7.0 (mTLS + 能力令牌 + Network Policy + LAN Discovery)
  *
  * 职责（纯中转，Zero Trust）：
  * - WebSocket 消息转发：subscribe / unsubscribe / publish
@@ -8,6 +8,7 @@
  * - join 事件审计日志（谁在什么时间加入了哪个 room）
  * - HTTP/HTTPS 健康检查端点
  * - Agent API（port 9527）：HTTP + WS，供外部 AI Agent 程序化操作画布
+ * - LAN Discovery（mDNS）：自动发现局域网内其他信令节点，Leader/Follower 自组网
  *
  * TLS 模式（按优先级自动选择）：
  * - 模式0：mTLS（PKI 证书存在时自动启用，Agent 客户端必须持有 CA 签发证书）
@@ -19,24 +20,29 @@
  * - WSS=false → 强制 ws://（纯开发模式，跳过全部 TLS）
  *
  * 环境变量：
- * - PORT            监听端口（默认 mTLS/WSS=4443, WS=4444）
- * - HOST            监听地址（默认 0.0.0.0）
- * - WSS             是否启用 TLS（默认 true；设 false 强制 ws://）
- * - MTLS_ENABLED    强制启用/禁用 mTLS（不设则自动检测 PKI 文件）
- * - MTLS_OPTIONAL   设为 true 时 mTLS 为可选（无证书客户端降级到 Ed25519 验签）
- * - WSS_CERT        TLS 证书路径（模式1）
- * - WSS_KEY         TLS 私钥路径（模式1）
- * - AUTH_REQUIRED   是否强制握手验签（默认 false；生产建议 true）
- * - VERBOSE         是否打印详细日志（默认 true）
+ * - PORT              监听端口（默认 mTLS/WSS=4443, WS=4444）
+ * - HOST              监听地址（默认 0.0.0.0）
+ * - WSS               是否启用 TLS（默认 true；设 false 强制 ws://）
+ * - MTLS_ENABLED      强制启用/禁用 mTLS（不设则自动检测 PKI 文件）
+ * - MTLS_OPTIONAL     设为 true 时 mTLS 为可选（无证书客户端降级到 Ed25519 验签）
+ * - WSS_CERT          TLS 证书路径（模式1）
+ * - WSS_KEY           TLS 私钥路径（模式1）
+ * - AUTH_REQUIRED     是否强制握手验签（默认 false；生产建议 true）
+ * - VERBOSE           是否打印详细日志（默认 true）
+ * - DISCOVERY         是否启用 LAN 自动发现（默认 true；设 false 禁用）
+ * - DISCOVERY_SCAN_MS mDNS 扫描等待时间（默认 3000ms）
+ * - NODE_ID           本节点 ID（默认随机生成 UUID v4 前8位）
  *
  * 启动: npx tsx src/index.ts
  */
 
 import * as WebSocket from 'ws'
 import * as https from 'https'
+import * as crypto from 'crypto'
 import { autoTLS, createServer, createMTLSServer, loadMTLSConfig, getPort, getProtocol } from './tls'
 import { loadMtlsConfig, readMtlsOptions, checkClientCert } from './mtls/index'
 import { startAgentApi } from './agentApi'
+import { LanDiscovery, type SignalingPeer } from './discovery'
 
 // ─── 配置 ───────────────────────────────────────────────────────────────────
 
@@ -44,6 +50,16 @@ const HOST = process.env.HOST ?? '0.0.0.0'
 const AUTH_REQUIRED = process.env.AUTH_REQUIRED === 'true'
 const VERBOSE = process.env.VERBOSE !== 'false'
 const REPLAY_WINDOW_MS = 30_000
+
+// LAN Discovery 配置
+const DISCOVERY_ENABLED = process.env.DISCOVERY !== 'false'
+const DISCOVERY_SCAN_MS = process.env.DISCOVERY_SCAN_MS ? Number(process.env.DISCOVERY_SCAN_MS) : 3000
+const NODE_ID = process.env.NODE_ID ?? crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+
+// Discovery 状态
+let lanDiscovery: LanDiscovery | null = null
+let discoveredPeers: SignalingPeer[] = []
+let isLeader = false
 
 // ─── 类型 ───────────────────────────────────────────────────────────────────
 
@@ -275,14 +291,43 @@ async function main() {
   const protocol: 'wss' | 'ws' = hasTls ? 'wss' : 'ws'
   const PORT = process.env.PORT ? Number(process.env.PORT) : (hasTls ? 4443 : 4444)
 
-  // ── 健康检查 Handler ─────────────────────────────────────────────────────
-  function healthHandler(_req: import('http').IncomingMessage, res: import('http').ServerResponse) {
+  // ── HTTP 路由 Handler ────────────────────────────────────────────────────
+  function healthHandler(req: import('http').IncomingMessage, res: import('http').ServerResponse) {
+    const url = req.url ?? '/'
+
+    // GET /peers — 返回当前发现的局域网信令节点列表（前端自动发现用）
+    if (url === '/peers' || url.startsWith('/peers?')) {
+      const peers = lanDiscovery?.getPeers() ?? []
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      })
+      res.end(JSON.stringify({
+        self: {
+          nodeId: NODE_ID,
+          port: PORT,
+          startTime: Date.now(), // 本机当前时间（实际 startTime 在 discovery 内部）
+          isLeader,
+        },
+        peers: peers.map(p => ({
+          nodeId: p.nodeId,
+          host: p.host,
+          port: p.port,
+          startTime: p.startTime,
+        })),
+        total: peers.length + 1, // 含自己
+        discovery_enabled: DISCOVERY_ENABLED,
+      }))
+      return
+    }
+
+    // GET / — 健康检查
     const totalPeers = [...rooms.values()].reduce((s, r) => s + r.size, 0)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
       service: 'syncthink-signaling',
-      version: '0.6.0',
-      phase: 'mtls+capability-token',
+      version: '0.7.0',
+      phase: 'mtls+capability-token+lan-discovery',
       protocol: mtls ? 'wss+mtls' : protocol,
       tls_source: mtls ? 'pki' : (tlsConfig?.source ?? null),
       mtls_enabled: !!mtls,
@@ -292,6 +337,12 @@ async function main() {
       peers: totalPeers,
       audit_entries: auditLog.size,
       room_policies: Object.fromEntries(roomPolicies),
+      discovery: {
+        enabled: DISCOVERY_ENABLED,
+        node_id: NODE_ID,
+        is_leader: isLeader,
+        lan_peers: lanDiscovery?.getPeers().length ?? 0,
+      },
     }))
   }
 
@@ -522,16 +573,59 @@ async function main() {
     })
   })
 
+  // ── LAN Discovery：先扫描再决定 Leader/Follower 角色 ──────────────────────
+  if (DISCOVERY_ENABLED) {
+    lanDiscovery = new LanDiscovery({ port: PORT, nodeId: NODE_ID, verbose: VERBOSE })
+
+    console.log(`  🔍  LAN Discovery: 扫描局域网 ${DISCOVERY_SCAN_MS}ms…`)
+    discoveredPeers = await lanDiscovery.scan(DISCOVERY_SCAN_MS)
+
+    if (discoveredPeers.length === 0) {
+      // 无其他节点 → 成为 Leader，开始广播自己
+      isLeader = true
+      lanDiscovery.startAdvertising()
+      console.log(`  👑  角色: Leader（无其他节点，本机成为主信令服务器）`)
+    } else {
+      // 有其他节点 → 成为 Follower
+      isLeader = false
+      const leader = lanDiscovery.getOldestPeer()!
+      console.log(`  🔗  角色: Follower（已发现 ${discoveredPeers.length} 个节点）`)
+      console.log(`  📡  主信令节点: ${leader.nodeId} @ ${leader.host}:${leader.port}`)
+      console.log(``)
+      console.log(`  ⚠️   前端应连接主节点而非本机，请通过 GET /peers 获取节点列表`)
+
+      // 继续监听，用于 Leader 宕机时的重新选主
+      lanDiscovery.on('peer:lost', (peer: SignalingPeer) => {
+        // 更新节点列表
+        discoveredPeers = lanDiscovery!.getPeers()
+
+        // 如果失去的是当前 Leader（最老的节点），尝试接任
+        const remaining = lanDiscovery!.getPeers()
+        if (remaining.length === 0 && !isLeader) {
+          // 所有节点都离开了，自己成为新 Leader
+          isLeader = true
+          lanDiscovery!.startAdvertising()
+          console.log(`  👑  Leader 宕机，本机升级为新 Leader！`)
+          console.log(`  📡  新主信令地址: ${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
+        }
+      })
+
+      lanDiscovery.on('peer:found', (_peer: SignalingPeer) => {
+        discoveredPeers = lanDiscovery!.getPeers()
+      })
+    }
+  }
+
   // 启动
   server.listen(PORT, HOST, () => {
     console.log('')
     console.log(`  ╔════════════════════════════════════════╗`)
-    console.log(`  ║  ⟁  SyncThink Signaling  v0.6.0      ║`)
+    console.log(`  ║  ⟁  SyncThink Signaling  v0.7.0      ║`)
     console.log(`  ╚════════════════════════════════════════╝`)
     console.log('')
 
     const displayProtocol = mtls ? 'wss+mtls' : protocol
-    console.log(`  ${displayProtocol.toUpperCase()} ✅  wss://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
+    console.log(`  ${displayProtocol.toUpperCase()} ✅  ${protocol}://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
 
     if (mtls) {
       console.log(`  🔐  mTLS 模式（私有 CA 签发证书，Agent 必须持有客户端证书）`)
@@ -557,6 +651,9 @@ async function main() {
 
     console.log(`  🔑  auth_required: ${AUTH_REQUIRED}`)
     console.log(`  ⏱   replay_window: ±${REPLAY_WINDOW_MS / 1000}s`)
+    if (DISCOVERY_ENABLED) {
+      console.log(`  🌐  LAN Discovery: 已启用 (nodeId=${NODE_ID}, role=${isLeader ? 'Leader 👑' : 'Follower 🔗'})`)
+    }
     console.log('')
 
     if (!mtls && !tlsConfig) {
