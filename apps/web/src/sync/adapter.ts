@@ -105,7 +105,8 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
       // 优先读注入的信令 URL（start.sh 局域网 / 环境变量）
       // 降级到公共 y-webrtc 信令服务器（无需本地服务，跨网络可用）
       const url = import.meta.env.VITE_SIGNALING_URL ??
-        'wss://signaling.yjs.dev'
+        // 直连信令端口（跳过 Vite proxy），适配局域网访问
+        `ws://${typeof location !== 'undefined' ? location.hostname : 'localhost'}:3010`
       console.info(`[SyncThink] Signaling URL: ${url}`)
       return [url]
     })(),

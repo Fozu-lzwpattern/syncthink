@@ -197,13 +197,13 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
       {(() => {
         const sigUrl = import.meta.env.VITE_SIGNALING_URL
         const isPublic = !sigUrl
-        const displayUrl = sigUrl ?? 'wss://signaling.yjs.dev'
+        const displayUrl = sigUrl ?? `ws://${location.hostname}:3010`
         return (
-          <div className={`px-4 py-1.5 text-xs font-mono flex items-center gap-2 ${isPublic ? 'bg-blue-900/30 text-blue-300' : 'bg-green-900/30 text-green-400'}`}>
-            <span>{isPublic ? '🌐' : '📡'}</span>
+          <div className={`px-4 py-1.5 text-xs font-mono flex items-center gap-2 ${isPublic ? 'bg-green-900/30 text-green-400' : 'bg-blue-900/30 text-blue-300'}`}>
+            <span>📡</span>
             <span>Signaling: <strong>{displayUrl}</strong></span>
             {isPublic && (
-              <span className="text-blue-400 ml-1">（公共信令，无需本地服务器，跨网络可用）</span>
+              <span className="text-green-500 ml-1">（直连本机信令，局域网协作）</span>
             )}
           </div>
         )
