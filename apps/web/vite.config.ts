@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    strictPort: true,   // 禁止 fallback 到 5174，确保 IndexedDB origin 稳定
     host: true,
     proxy: {
       // WS proxy: 浏览器连 ws://localhost:5173/signaling → 转发到 wss://localhost:4443

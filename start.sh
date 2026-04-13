@@ -157,14 +157,43 @@ SIGNALING_PID=$!
 # 等待信令服务器预热
 sleep 2
 
+# ─── 检测局域网 IP ───────────────────────────────────────────────────────────
+
+# 自动检测局域网 IP，供多人协作时所有人连同一个信令服务器
+# macOS: ipconfig getifaddr en0/en1; Linux: hostname -I
+detect_lan_ip() {
+  local ip=""
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    ip=$(ipconfig getifaddr en0 2>/dev/null || true)
+    if [ -z "$ip" ]; then
+      ip=$(ipconfig getifaddr en1 2>/dev/null || true)
+    fi
+    # 尝试 Wi-Fi 其他接口
+    if [ -z "$ip" ]; then
+      ip=$(ipconfig getifaddr en2 2>/dev/null || true)
+    fi
+  else
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  fi
+  # 降级：回退 localhost
+  echo "${ip:-localhost}"
+}
+
+LAN_IP=$(detect_lan_ip)
+VITE_SIGNALING_URL_COMPUTED="ws://${LAN_IP}:${SIGNALING_PORT}"
+
+log "局域网 IP: ${LAN_IP}"
+log "信令地址（多人协作用）: ${VITE_SIGNALING_URL_COMPUTED}"
+echo ""
+
 # ─── 启动前端 dev server ─────────────────────────────────────────────────────
 
 echo -e "${PREFIX_WEB} 启动前端 dev server（port ${WEB_PORT}）..."
 
 (
   cd "$SCRIPT_DIR/apps/web"
-  VITE_SIGNALING_URL="ws://localhost:${SIGNALING_PORT}" \
-  pnpm run dev -- --port "$WEB_PORT" 2>&1 | pipe_prefix "$PREFIX_WEB"
+  VITE_SIGNALING_URL="${VITE_SIGNALING_URL_COMPUTED}" \
+  pnpm run dev -- --port "$WEB_PORT" --strictPort 2>&1 | pipe_prefix "$PREFIX_WEB"
 ) &
 WEB_PID=$!
 
@@ -173,10 +202,18 @@ WEB_PID=$!
 sleep 2
 echo ""
 echo -e "${BOLD}${GREEN}✅ SyncThink is running!${RESET}"
-echo -e "  📡 ${BOLD}Signaling:${RESET}  ws://localhost:${SIGNALING_PORT}"
+echo -e "  📡 ${BOLD}Signaling:${RESET}  ${VITE_SIGNALING_URL_COMPUTED}"
 echo -e "  🤖 ${BOLD}Agent API:${RESET}  http://localhost:${AGENT_API_PORT}"
 echo -e "  🌐 ${BOLD}Web App:${RESET}    http://localhost:${WEB_PORT}"
 echo -e "  📖 ${BOLD}Docs:${RESET}       https://github.com/Fozu-lzwpattern/syncthink"
+echo ""
+if [ "$LAN_IP" != "localhost" ]; then
+  echo -e "  ${CYAN}💡 团队协作：让其他人访问 http://${LAN_IP}:${WEB_PORT}${RESET}"
+  echo -e "  ${CYAN}   所有人将自动连接到此机器的信令服务器${RESET}"
+else
+  echo -e "  ${YELLOW}⚠️  未检测到局域网 IP，当前仅支持本机单人使用${RESET}"
+  echo -e "  ${YELLOW}   如需多人协作，请确认网络连接后重启${RESET}"
+fi
 echo ""
 echo -e "  ${GRAY}按 Ctrl+C 停止所有服务${RESET}"
 echo ""

@@ -33,6 +33,9 @@ importers:
       '@noble/ed25519':
         specifier: ^3.0.1
         version: 3.1.0
+      bonjour-service:
+        specifier: ^1.3.0
+        version: 1.3.0
       ws:
         specifier: ^8.18.0
         version: 8.20.0
@@ -47,7 +50,7 @@ importers:
         specifier: ^4.19.3
         version: 4.21.0
       typescript:
-        specifier: ^5.7.3
+        specifier: ^5.9.3
         version: 5.9.3
 
   apps/web:
@@ -522,6 +525,9 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha1-2xXWeByTHzolGj2sOVAcmKYIL9A=, tarball: http://r.npm.sankuai.com/@jridgewell/trace-mapping/download/@jridgewell/trace-mapping-0.3.31.tgz}
+
+  '@leichtgewicht/ip-codec@2.0.5':
+    resolution: {integrity: sha1-T8VsFcWAua233DwzOhNOVAtEv7E=, tarball: http://r.npm.sankuai.com/@leichtgewicht/ip-codec/download/@leichtgewicht/ip-codec-2.0.5.tgz}
 
   '@noble/ed25519@2.3.0':
     resolution: {integrity: sha1-3w2+Qkz9faSWi5VrgZwV21++fyE=, tarball: http://r.npm.sankuai.com/@noble/ed25519/download/@noble/ed25519-2.3.0.tgz}
@@ -1430,6 +1436,9 @@ packages:
     resolution: {integrity: sha1-9uFKl4WNMnJSIAJC1Mz+UixEVSI=, tarball: http://r.npm.sankuai.com/binary-extensions/download/binary-extensions-2.3.0.tgz}
     engines: {node: '>=8'}
 
+  bonjour-service@1.3.0:
+    resolution: {integrity: sha1-gNhnQwtaDaZOgqgEf8HjVb23FyI=, tarball: http://r.npm.sankuai.com/bonjour-service/download/bonjour-service-1.3.0.tgz}
+
   braces@3.0.3:
     resolution: {integrity: sha1-SQMy9AkZRSJy1VqEgK3AxEE1h4k=, tarball: http://r.npm.sankuai.com/braces/download/braces-3.0.3.tgz}
     engines: {node: '>=8'}
@@ -1515,6 +1524,10 @@ packages:
   dlv@1.1.3:
     resolution: {integrity: sha1-XBmKihFFNZbnUUlNSYdLx3MvLnk=, tarball: http://r.npm.sankuai.com/dlv/download/dlv-1.1.3.tgz}
 
+  dns-packet@5.6.1:
+    resolution: {integrity: sha1-roiK1CWp0UeKBnQlarhm3hASzy8=, tarball: http://r.npm.sankuai.com/dns-packet/download/dns-packet-5.6.1.tgz}
+    engines: {node: '>=6'}
+
   electron-to-chromium@1.5.334:
     resolution: {integrity: sha1-Hj/djQFIUhBOuOYy52D7Nk233Q4=, tarball: http://r.npm.sankuai.com/electron-to-chromium/download/electron-to-chromium-1.5.334.tgz}
 
@@ -1544,6 +1557,9 @@ packages:
 
   eventemitter3@4.0.7:
     resolution: {integrity: sha1-Lem2j2Uo1WRO9cWVJqG0oHMGFp8=, tarball: http://r.npm.sankuai.com/eventemitter3/download/eventemitter3-4.0.7.tgz}
+
+  fast-deep-equal@3.1.3:
+    resolution: {integrity: sha1-On1WtVnWy8PrUSMlJE5hmmXGxSU=, tarball: http://r.npm.sankuai.com/fast-deep-equal/download/fast-deep-equal-3.1.3.tgz}
 
   fast-glob@3.3.3:
     resolution: {integrity: sha1-0G1YXOjbqQoWsFBcVDw8z7OuuBg=, tarball: http://r.npm.sankuai.com/fast-glob/download/fast-glob-3.3.3.tgz}
@@ -1724,6 +1740,10 @@ packages:
 
   ms@2.1.3:
     resolution: {integrity: sha1-V0yBOM4dK1hh8LRFedut1gxmFbI=, tarball: http://r.npm.sankuai.com/ms/download/ms-2.1.3.tgz}
+
+  multicast-dns@7.2.5:
+    resolution: {integrity: sha1-d+tGBX9NetvRbZKQ+nKZ9vpkzO0=, tarball: http://r.npm.sankuai.com/multicast-dns/download/multicast-dns-7.2.5.tgz}
+    hasBin: true
 
   mz@2.7.0:
     resolution: {integrity: sha1-lQCAV6Vsr63CvGPd5/n/aVWUjjI=, tarball: http://r.npm.sankuai.com/mz/download/mz-2.7.0.tgz}
@@ -1979,6 +1999,9 @@ packages:
 
   thenify@3.3.1:
     resolution: {integrity: sha1-iTLmhqQGYDigFt2eLKRq3Zg4qV8=, tarball: http://r.npm.sankuai.com/thenify/download/thenify-3.3.1.tgz}
+
+  thunky@1.1.0:
+    resolution: {integrity: sha1-Wrr3FKlAXbBQRzK7zNLO3Z75U30=, tarball: http://r.npm.sankuai.com/thunky/download/thunky-1.1.0.tgz}
 
   tinyglobby@0.2.15:
     resolution: {integrity: sha1-4ijdHmOM6pk9L9tPzS1GAqeZUcI=, tarball: http://r.npm.sankuai.com/tinyglobby/download/tinyglobby-0.2.15.tgz}
@@ -2431,6 +2454,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@leichtgewicht/ip-codec@2.0.5': {}
 
   '@noble/ed25519@2.3.0': {}
 
@@ -3303,6 +3328,11 @@ snapshots:
 
   binary-extensions@2.3.0: {}
 
+  bonjour-service@1.3.0:
+    dependencies:
+      fast-deep-equal: 3.1.3
+      multicast-dns: 7.2.5
+
   braces@3.0.3:
     dependencies:
       fill-range: 7.1.1
@@ -3386,6 +3416,10 @@ snapshots:
 
   dlv@1.1.3: {}
 
+  dns-packet@5.6.1:
+    dependencies:
+      '@leichtgewicht/ip-codec': 2.0.5
+
   electron-to-chromium@1.5.334: {}
 
   emoji-regex@8.0.0: {}
@@ -3452,6 +3486,8 @@ snapshots:
   escalade@3.2.0: {}
 
   eventemitter3@4.0.7: {}
+
+  fast-deep-equal@3.1.3: {}
 
   fast-glob@3.3.3:
     dependencies:
@@ -3584,6 +3620,11 @@ snapshots:
       picomatch: 2.3.2
 
   ms@2.1.3: {}
+
+  multicast-dns@7.2.5:
+    dependencies:
+      dns-packet: 5.6.1
+      thunky: 1.1.0
 
   mz@2.7.0:
     dependencies:
@@ -3868,6 +3909,8 @@ snapshots:
   thenify@3.3.1:
     dependencies:
       any-promise: 1.3.0
+
+  thunky@1.1.0: {}
 
   tinyglobby@0.2.15:
     dependencies:

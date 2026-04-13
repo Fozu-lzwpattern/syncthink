@@ -101,7 +101,12 @@ export interface SyncAdapterOptions {
 export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
   const {
     channelId,
-    signalingUrls = [`${typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss' : 'ws'}://${typeof location !== 'undefined' ? location.host : 'localhost:5173'}/signaling`],
+    signalingUrls = [
+      // 优先读 start.sh 注入的局域网信令 URL（多人协作时指向 Leader）
+      // 未注入时降级到 Vite proxy（单机开发用）
+      import.meta.env.VITE_SIGNALING_URL ??
+        `${typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss' : 'ws'}://${typeof location !== 'undefined' ? location.host : 'localhost:5173'}/signaling`
+    ],
     enableWebrtc = true,
     trustedPeers,
     bannedPeers,
