@@ -6,14 +6,15 @@
  * - avatarColor 由 nodeId 确定性派生（永不变更）
  */
 import * as ed from '@noble/ed25519'
+import { sha512, sha256 } from '@noble/hashes/sha2.js'
 import { db } from '../lib/db'
 import type { NodeIdentity } from './types'
 
-// noble/ed25519 v2 需要手动注入 sha512（浏览器环境用 WebCrypto）
+// noble/ed25519 v2 需要手动注入 sha512
+// 使用 @noble/hashes 纯 JS 实现，不依赖 crypto.subtle，HTTP 局域网访问也可用
 ed.etc.sha512Async = async (...msgs: Uint8Array[]) => {
   const data = ed.etc.concatBytes(...msgs)
-  const buf = await crypto.subtle.digest('SHA-512', data.buffer as ArrayBuffer)
-  return new Uint8Array(buf)
+  return sha512(data)
 }
 
 const IDENTITY_KEY = 'node_identity_v1'
@@ -26,8 +27,7 @@ function hex(bytes: Uint8Array): string {
 }
 
 async function sha256hex(data: Uint8Array): Promise<string> {
-  const buf = await crypto.subtle.digest('SHA-256', data.buffer as ArrayBuffer)
-  return hex(new Uint8Array(buf))
+  return hex(sha256(data))
 }
 
 /**
