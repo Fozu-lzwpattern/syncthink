@@ -193,6 +193,22 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
         </div>
       )}
 
+      {/* 信令服务器状态 Banner（多人协作诊断用）*/}
+      {(() => {
+        const sigUrl = import.meta.env.VITE_SIGNALING_URL
+        const isProxy = !sigUrl
+        const displayUrl = sigUrl ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/signaling`
+        return (
+          <div className={`px-4 py-1.5 text-xs font-mono flex items-center gap-2 ${isProxy ? 'bg-yellow-900/30 text-yellow-400' : 'bg-green-900/30 text-green-400'}`}>
+            <span>{isProxy ? '⚠️' : '📡'}</span>
+            <span>Signaling: <strong>{displayUrl}</strong></span>
+            {isProxy && (
+              <span className="text-yellow-500 ml-1">（本机 Vite proxy，仅单人可用）</span>
+            )}
+          </div>
+        )
+      })()}
+
       {/* Header */}
       <div className="border-b border-st-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
