@@ -196,14 +196,14 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
       {/* 信令服务器状态 Banner（多人协作诊断用）*/}
       {(() => {
         const sigUrl = import.meta.env.VITE_SIGNALING_URL
-        const isProxy = !sigUrl
-        const displayUrl = sigUrl ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/signaling`
+        const isPublic = !sigUrl
+        const displayUrl = sigUrl ?? 'wss://signaling.yjs.dev'
         return (
-          <div className={`px-4 py-1.5 text-xs font-mono flex items-center gap-2 ${isProxy ? 'bg-yellow-900/30 text-yellow-400' : 'bg-green-900/30 text-green-400'}`}>
-            <span>{isProxy ? '⚠️' : '📡'}</span>
+          <div className={`px-4 py-1.5 text-xs font-mono flex items-center gap-2 ${isPublic ? 'bg-blue-900/30 text-blue-300' : 'bg-green-900/30 text-green-400'}`}>
+            <span>{isPublic ? '🌐' : '📡'}</span>
             <span>Signaling: <strong>{displayUrl}</strong></span>
-            {isProxy && (
-              <span className="text-yellow-500 ml-1">（本机 Vite proxy，仅单人可用）</span>
+            {isPublic && (
+              <span className="text-blue-400 ml-1">（公共信令，无需本地服务器，跨网络可用）</span>
             )}
           </div>
         )

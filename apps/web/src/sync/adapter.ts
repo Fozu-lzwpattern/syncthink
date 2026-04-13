@@ -102,10 +102,10 @@ export function createSyncAdapter(options: SyncAdapterOptions): SyncAdapter {
   const {
     channelId,
     signalingUrls = (() => {
-      // 优先读 start.sh 注入的局域网信令 URL（多人协作时指向 Host）
-      // 未注入时降级到 Vite proxy（单机开发用）
+      // 优先读注入的信令 URL（start.sh 局域网 / 环境变量）
+      // 降级到公共 y-webrtc 信令服务器（无需本地服务，跨网络可用）
       const url = import.meta.env.VITE_SIGNALING_URL ??
-        `${typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss' : 'ws'}://${typeof location !== 'undefined' ? location.host : 'localhost:5173'}/signaling`
+        'wss://signaling.yjs.dev'
       console.info(`[SyncThink] Signaling URL: ${url}`)
       return [url]
     })(),
