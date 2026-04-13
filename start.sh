@@ -193,7 +193,7 @@ echo -e "${PREFIX_WEB} 启动前端 dev server（port ${WEB_PORT}）..."
 (
   cd "$SCRIPT_DIR/apps/web"
   VITE_SIGNALING_URL="${VITE_SIGNALING_URL_COMPUTED}" \
-  pnpm run dev -- --port "$WEB_PORT" --strictPort 2>&1 | pipe_prefix "$PREFIX_WEB"
+  pnpm run dev -- --port "$WEB_PORT" --strictPort --host 0.0.0.0 2>&1 | pipe_prefix "$PREFIX_WEB"
 ) &
 WEB_PID=$!
 
