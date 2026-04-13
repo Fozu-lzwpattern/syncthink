@@ -4,6 +4,7 @@
 import { useState, useCallback } from 'react'
 import { getChannel, revokeAllInviteCodes } from '../channel/channel'
 import type { NodeIdentity } from '../identity/types'
+import { safeCopyText } from '../utils/clipboard'
 
 interface Props {
   channelId: string
@@ -44,10 +45,10 @@ export function useInvite({ channelId, identity }: Props) {
   const closeInvite = useCallback(() => setShowInvite(false), [])
 
   const copyInvite = useCallback(() => {
-    navigator.clipboard.writeText(inviteUrl).then(() => {
+    safeCopyText(inviteUrl).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    })
+    }).catch(console.error)
   }, [inviteUrl])
 
   const revokeAll = useCallback(async () => {

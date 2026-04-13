@@ -9,6 +9,7 @@ import type { NodeIdentity } from '../identity/types'
 import type { Channel } from '../channel/types'
 import { createChannel, joinChannel, listChannels, getChannel } from '../channel/channel'
 import { recordInteraction } from '../interaction/log'
+import { safeCopyText } from '../utils/clipboard'
 
 const LOCAL_SERVICES_CHANNEL_ID = 'local-services-01'
 
@@ -102,10 +103,10 @@ export function ChannelListPage({ identity, onEnterChannel }: Props) {
 
   const handleCopyInvite = () => {
     if (!inviteUrl) return
-    navigator.clipboard.writeText(inviteUrl).then(() => {
+    safeCopyText(inviteUrl).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    })
+    }).catch(console.error)
   }
 
   const handleJoin = async () => {
