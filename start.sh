@@ -202,13 +202,19 @@ WEB_PID=$!
 sleep 2
 echo ""
 echo -e "${BOLD}${GREEN}✅ SyncThink is running!${RESET}"
+if [ "$LAN_IP" != "localhost" ]; then
+  WEB_ACCESS_URL="http://${LAN_IP}:${WEB_PORT}"
+else
+  WEB_ACCESS_URL="http://localhost:${WEB_PORT}"
+fi
+
 echo -e "  📡 ${BOLD}Signaling:${RESET}  ${VITE_SIGNALING_URL_COMPUTED}"
 echo -e "  🤖 ${BOLD}Agent API:${RESET}  http://localhost:${AGENT_API_PORT}"
-echo -e "  🌐 ${BOLD}Web App:${RESET}    http://localhost:${WEB_PORT}"
+echo -e "  🌐 ${BOLD}Web App:${RESET}    ${WEB_ACCESS_URL}"
 echo -e "  📖 ${BOLD}Docs:${RESET}       https://github.com/Fozu-lzwpattern/syncthink"
 echo ""
 if [ "$LAN_IP" != "localhost" ]; then
-  echo -e "  ${CYAN}💡 团队协作：让其他人访问 http://${LAN_IP}:${WEB_PORT}${RESET}"
+  echo -e "  ${CYAN}💡 团队协作：让其他人访问 ${BOLD}${WEB_ACCESS_URL}${RESET}"
   echo -e "  ${CYAN}   所有人将自动连接到此机器的信令服务器${RESET}"
 else
   echo -e "  ${YELLOW}⚠️  未检测到局域网 IP，当前仅支持本机单人使用${RESET}"
